@@ -38,12 +38,24 @@ def parser() -> argparse.ArgumentParser:
     project = commands.add_parser("project", help="automation-safe project inspection")
     project_commands = project.add_subparsers(dest="project_command", required=True)
     project_commands.add_parser("status", help="return provider, workflow, and delivery status")
+    route = commands.add_parser("route", help="explain read-only provider routing decisions")
+    route_commands = route.add_subparsers(dest="route_command", required=True)
+    route_explain = route_commands.add_parser("explain", help="explain one role's configured route")
+    route_explain.add_argument("--role", choices=[role.value for role in Role], required=True)
+    route_commands.add_parser("status", help="explain routes for every configured role")
     smoke = commands.add_parser("smoke", help="explicit real provider tests in isolated temporary workspaces")
     smoke.add_argument("--provider", action="append", required=True, choices=[provider.value for provider in Provider])
     smoke.add_argument("--code-test", action="store_true", help="also test a Claude-generated Python utility with executable assertions")
     commands.add_parser("migrate", help="explicitly migrate an existing ledger to the current schema")
     backup = commands.add_parser("backup", help="create a new validated SQLite backup without overwriting files")
     backup.add_argument("--destination", required=True)
+    orchestrate = commands.add_parser("orchestrate", help="verify orchestration policy compliance")
+    orch_commands = orchestrate.add_subparsers(dest="orchestration_command", required=True)
+    orch_commands.add_parser("verify-policy", help="verify CLAUDE.md policy consistency with constraints")
+    orch_commands.add_parser("verify-invariants", help="verify no hardcoded provider choices or policy violations")
+    for orch_cmd in (orch_commands.choices.get("verify-policy"), orch_commands.choices.get("verify-invariants")):
+        if orch_cmd is not None:
+            orch_cmd.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     tasks = commands.add_parser("task", help="create and inspect task records; no dispatch")
     task_commands = tasks.add_subparsers(dest="task_command", required=True)
     create = task_commands.add_parser("create")
@@ -232,6 +244,7 @@ def parser() -> argparse.ArgumentParser:
     for command in (validate, diagnostic, smoke, backup, create, listing, show, events, attempts, evidence, claims, reconcile,
                      workflow_create, workflow_list, workflow_show, workflow_status, workflow_events, workflow_step, workflow_reconcile,
                      delivery_create, delivery_list, delivery_step, delivery_reconcile, delivery_status, *delivery_reads,
+                     route_explain, route_commands.choices["status"],
                      project_commands.choices["status"], improvement_create, improvement_run, improvement_status, improvement_events,
                      improvement_rollback, improvement_review, improvement_publish, improvement_reconcile, improvement_cancel,
                      autonomy_plan, autonomy_run, autonomy_commands.choices["stop"],
@@ -280,6 +293,25 @@ def _run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         assert config is not None
         return provider_command(args, paths, config)
     store = EventStore(paths.database)
+    if args.command == "route":
+        from .provider_health import ProviderHealthStore
+        from .routing import explain_provider_route, load_routing_policy
+        assert config is not None
+        policy = load_routing_policy(config)
+        health = ProviderHealthStore(store)
+        roles = (Role(args.role),) if args.route_command == "explain" else tuple(Role)
+        routes = [explain_provider_route(config, policy, health, role) for role in roles]
+        if args.route_command == "explain":
+            route_result = routes[0]
+            return {"route": route_result, "available": route_result["selected_provider"] is not None}, 0
+        return {
+            "routes": routes,
+            "available_roles": [item["role"] for item in routes if item["selected_provider"] is not None],
+        }, 0
+    if args.command == "orchestrate":
+        from .orchestration import orchestrate_command
+        assert config is not None
+        return orchestrate_command(args, paths.config, config)
     if args.command == "autonomy":
         from .autonomy import AutonomyLimits, clear_stop, plan_and_enqueue, request_stop, run_queue
         assert config is not None

@@ -42,6 +42,13 @@ class TaskStatus(str, Enum):
 
 FOUNDATION_STATES = frozenset({TaskStatus.CREATED, TaskStatus.BLOCKED, TaskStatus.CANCELLED})
 
+# Execution states are durable task states that track live or completed
+# execution.  They are persisted in the same EventStore as foundation
+# states — there is no second source of truth.
+EXECUTION_STATES = frozenset({TaskStatus.RUNNING, TaskStatus.SUCCEEDED, TaskStatus.FAILED})
+
+VALID_TASK_STATES = FOUNDATION_STATES | EXECUTION_STATES
+
 
 @dataclass(frozen=True)
 class TaskSpec:
@@ -111,12 +118,18 @@ class TaskSnapshot:
     plan_digest: str | None = None
     current_attempt: str | None = None
     correction_rounds_used: int = 0
+    # Phase 3A execution state fields
+    execution_status: TaskStatus | None = None
+    execution_attempt_id: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.spec, TaskSpec):
             raise ValidationError("snapshot spec must be a TaskSpec")
-        if not isinstance(self.status, TaskStatus) or self.status not in FOUNDATION_STATES:
-            raise ExecutionGuardError("execution snapshots require mechanisms unavailable in the foundation")
+        if not isinstance(self.status, TaskStatus) or self.status not in VALID_TASK_STATES:
+            raise ExecutionGuardError(
+                f"invalid task status: {self.status.value}; "
+                f"must be in {sorted(s.value for s in VALID_TASK_STATES)}"
+            )
         bounded_int(self.revision, "revision", 1, 2**63 - 1)
         utc_timestamp(self.created_at)
         utc_timestamp(self.updated_at)
@@ -126,9 +139,22 @@ class TaskSnapshot:
                 raise ValidationError("foundation blocked tasks must resume CREATED")
         elif self.blocking_reason is not None or self.resume_status is not None:
             raise ValidationError("only BLOCKED tasks carry blocking reason/resume state")
-        if any(value is not None for value in (self.plan_revision, self.plan_digest, self.current_attempt)):
-            raise ExecutionGuardError("accepted packets and attempts are unavailable in the foundation")
-        bounded_int(self.correction_rounds_used, "correction_rounds_used", 0, 0)
+        # Guard against foundation-only fields when execution state fields are present
+        if self.execution_status is not None or self.execution_attempt_id is not None:
+            if any(value is not None for value in (self.plan_revision, self.plan_digest, self.current_attempt)):
+                raise ValidationError("execution state fields and legacy plan/attempt fields are mutually exclusive")
+        else:
+            if any(value is not None for value in (self.plan_revision, self.plan_digest, self.current_attempt)):
+                raise ExecutionGuardError("accepted packets and attempts are unavailable in the foundation")
+            bounded_int(self.correction_rounds_used, "correction_rounds_used", 0, 0)
+        # Validate execution state field consistency
+        if self.execution_status is not None:
+            if self.execution_status not in EXECUTION_STATES:
+                raise ValidationError(f"execution_status must be one of {sorted(s.value for s in EXECUTION_STATES)}, got {self.execution_status.value}")
+        if self.execution_attempt_id is not None:
+            task_id(self.execution_attempt_id)
+            if self.execution_status is None:
+                raise ValidationError("execution_attempt_id requires a non-null execution_status")
 
     def to_dict(self) -> dict[str, Any]:
         return {"spec": self.spec.to_dict(), "status": self.status.value, "revision": self.revision,
@@ -136,7 +162,9 @@ class TaskSnapshot:
                 "blocking_reason": self.blocking_reason,
                 "resume_status": self.resume_status.value if self.resume_status else None,
                 "plan_revision": None, "plan_digest": None, "current_attempt": None,
-                "correction_rounds_used": 0}
+                "correction_rounds_used": 0,
+                "execution_status": self.execution_status.value if self.execution_status else None,
+                "execution_attempt_id": self.execution_attempt_id}
 
     @classmethod
     def from_dict(cls, value: object) -> "TaskSnapshot":
@@ -146,6 +174,8 @@ class TaskSnapshot:
             data["status"] = TaskStatus(data["status"])
             if data["resume_status"] is not None:
                 data["resume_status"] = TaskStatus(data["resume_status"])
+            if data["execution_status"] is not None:
+                data["execution_status"] = TaskStatus(data["execution_status"])
             return cls(**data)
         except (ValueError, TypeError) as exc:
             raise ValidationError("invalid TaskSnapshot enum or field type") from exc
@@ -168,7 +198,10 @@ class LedgerEvent:
         task_id(self.task_id)
         bounded_int(self.revision, "event revision", 1, 2**63 - 1)
         bounded_int(self.schema_version, "event schema_version", 1, 1)
-        if not isinstance(self.event_type, str) or self.event_type not in {"TASK_CREATED", "TASK_TRANSITIONED"} or self.actor != "controller":
+        if not isinstance(self.event_type, str) or self.event_type not in {
+            "TASK_CREATED", "TASK_TRANSITIONED",
+            "TASK_EXECUTION_STARTED", "TASK_EXECUTION_COMPLETED",
+        } or self.actor != "controller":
             raise ValidationError("unsupported event type or actor")
         utc_timestamp(self.timestamp)
         command_id(self.command_id)
@@ -181,19 +214,48 @@ class LedgerEvent:
                 "payload": parse_canonical_json(self.payload_json)}
 
 
+# Phase 3A: Execution state transition table.
+# Tasks start in CREATED; execution begins via begin_execution() which records
+# RUNNING as the execution_status but leaves status as CREATED in the ledger.
+# Completion transitions the persisted status through SUCCEEDED/FAILED/CANCELLED.
+_EXECUTION_TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
+    TaskStatus.CREATED: frozenset({TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.CANCELLED}),
+    TaskStatus.RUNNING: frozenset({TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.CANCELLED}),
+    TaskStatus.SUCCEEDED: frozenset(),
+    TaskStatus.FAILED: frozenset(),
+    TaskStatus.CANCELLED: frozenset(),
+}
+_FOUNDATION_ONLY_TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
+    TaskStatus.CREATED: frozenset({TaskStatus.BLOCKED, TaskStatus.CANCELLED}),
+    TaskStatus.BLOCKED: frozenset({TaskStatus.CREATED, TaskStatus.CANCELLED}),
+    TaskStatus.CANCELLED: frozenset(),
+}
+
+
 def validate_transition(current: TaskSnapshot, target: TaskStatus, reason: str | None) -> None:
     if not isinstance(current, TaskSnapshot):
         raise ValidationError("current must be a TaskSnapshot")
     if not isinstance(target, TaskStatus):
         raise ValidationError("target must be a TaskStatus enum")
-    if target not in FOUNDATION_STATES:
-        raise ExecutionGuardError("execution states require accepted packets, dispatch claims, and evidence; unavailable")
-    allowed = {TaskStatus.CREATED: {TaskStatus.BLOCKED, TaskStatus.CANCELLED},
-               TaskStatus.BLOCKED: {TaskStatus.CREATED, TaskStatus.CANCELLED},
-               TaskStatus.CANCELLED: set()}
-    if target not in allowed[current.status]:
-        raise TransitionError(f"cannot transition {current.status.value} to {target.value}")
-    if target is TaskStatus.BLOCKED or current.status is TaskStatus.BLOCKED and target is TaskStatus.CREATED:
+    # Execution-capable snapshots can transition to/from execution states.
+    has_execution = current.execution_status is not None
+    if has_execution:
+        allowed = _EXECUTION_TRANSITIONS.get(current.status, frozenset())
+        if target not in allowed:
+            raise TransitionError(
+                f"cannot transition {current.status.value} to {target.value} "
+                f"(execution snapshot allows {sorted(s.value for s in allowed) or 'none'})"
+            )
+    else:
+        if target not in FOUNDATION_STATES:
+            raise ExecutionGuardError(
+                "execution states require execution-capable snapshots; "
+                "call begin_execution() first"
+            )
+        allowed = _FOUNDATION_ONLY_TRANSITIONS.get(current.status, frozenset())
+        if target not in allowed:
+            raise TransitionError(f"cannot transition {current.status.value} to {target.value}")
+    if target is TaskStatus.BLOCKED or (current.status is TaskStatus.BLOCKED and target is TaskStatus.CREATED):
         text(reason, "blocking/resolving reason")
     elif reason is not None:
         text(reason, "transition reason")

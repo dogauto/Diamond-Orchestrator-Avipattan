@@ -148,7 +148,10 @@ class ProviderHealthStore:
 
     def get_health(self, provider: Provider) -> ProviderHealth:
         """Get current health state for a provider."""
-        self._ensure_table()
+        # Read-only inspection must not create a ledger or mutate schema.  A
+        # missing database simply means that no health observation exists yet.
+        if not self.ledger._database_present():
+            return ProviderHealth.default(provider)
         with self.ledger._connection(write=False) as conn:
             row = conn.execute("""
                 SELECT provider, last_probe_ts, rate_limit_json, consecutive_failures,
@@ -177,7 +180,8 @@ class ProviderHealthStore:
 
     def list_healthy(self, min_remaining: int = 1, now: float | None = None) -> list[ProviderHealth]:
         """List all providers that meet health criteria."""
-        self._ensure_table()
+        if not self.ledger._database_present():
+            return []
         with self.ledger._connection(write=False) as conn:
             rows = conn.execute("""
                 SELECT provider, last_probe_ts, rate_limit_json, consecutive_failures,

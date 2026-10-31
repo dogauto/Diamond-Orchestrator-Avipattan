@@ -39,6 +39,31 @@ def replay_events(events: tuple[LedgerEvent, ...]) -> TaskSnapshot:
                 current = next_snapshot(current, target, data["reason"], event.timestamp)
                 if data["resume_status"] != (current.resume_status.value if current.resume_status else None):
                     raise StorageError("transition resume state disagrees with event history")
+            elif event.event_type == "TASK_EXECUTION_STARTED" and current is not None:
+                data = exact_keys(payload, {"schema_version", "attempt_id"}, "execution started payload")
+                if type(data["schema_version"]) is not int or data["schema_version"] != 1:
+                    raise StorageError("unsupported execution started payload schema")
+                if current.execution_status is not None:
+                    raise StorageError("execution already started; duplicate start event")
+                current = replace(current,
+                                  execution_status=TaskStatus.RUNNING,
+                                  execution_attempt_id=data["attempt_id"],
+                                  updated_at=event.timestamp)
+            elif event.event_type == "TASK_EXECUTION_COMPLETED" and current is not None:
+                data = exact_keys(payload, {"schema_version", "result_status", "detail"}, "execution completed payload")
+                if type(data["schema_version"]) is not int or data["schema_version"] != 1:
+                    raise StorageError("unsupported execution completed payload schema")
+                if current.execution_status is None:
+                    raise StorageError("completion event without prior start event")
+                result = TaskStatus(data["result_status"])
+                if result not in {TaskStatus.SUCCEEDED, TaskStatus.FAILED}:
+                    raise StorageError(f"execution result must be SUCCEEDED or FAILED, got {result.value}")
+                current = replace(current,
+                                  execution_status=result,
+                                  updated_at=event.timestamp)
+                # If the status was CREATED, promote it to the result status.
+                if current.status is TaskStatus.CREATED:
+                    current = replace(current, status=result, updated_at=event.timestamp)
             else:
                 raise StorageError("event stream must begin with exactly one creation event")
         assert current is not None

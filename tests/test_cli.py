@@ -160,6 +160,34 @@ class CliTests(ProjectCase):
         self.assertEqual({probe["status"] for probe in data["result"]["providers"]}, {"available"})
         self.assertFalse((self.project / ".diamond").exists())
 
+    def test_route_explain_is_read_only_and_does_not_launch_provider(self) -> None:
+        binary_dir = self.base / "fake-route-providers"
+        binary_dir.mkdir()
+        names = {Provider.ANTIGRAVITY: "agy"}
+        for provider in Provider:
+            executable = self.fake_executable(provider.value, "from pathlib import Path\nPath('provider-was-called').write_text('forbidden')")
+            executable.rename(binary_dir / names.get(provider, provider.value))
+
+        result = self.cli_process("--json", "route", "explain", "--role", "builder", environment={"PATH": str(binary_dir)})
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        data = json.loads(result.stdout)
+        route = data["result"]["route"]
+        self.assertEqual(route["selected_provider"], "claude")
+        self.assertEqual(route["candidates"][0]["capabilities"]["reachable"], True)
+        self.assertFalse((self.project / ".diamond").exists())
+        self.assertFalse((self.base / "provider-was-called").exists())
+
+    def test_route_explain_returns_degraded_status_without_turning_it_into_execution(self) -> None:
+        empty_path = self.base / "empty-path"
+        empty_path.mkdir()
+        result = self.cli_process("--json", "route", "explain", "--role", "builder", environment={"PATH": str(empty_path)})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        route = json.loads(result.stdout)["result"]
+        self.assertFalse(route["available"])
+        self.assertIsNone(route["route"]["selected_provider"])
+        self.assertFalse((self.project / ".diamond").exists())
+
     def test_workflow_status_alias_matches_show_and_list_is_machine_readable(self) -> None:
         workspace = self.base / "workflow-workspace"
         workspace.mkdir()

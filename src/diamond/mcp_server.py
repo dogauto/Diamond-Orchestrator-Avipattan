@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Callable, TextIO
 
 from .cli import main as controller_main
+from .domain import Role
 from .errors import DiamondError, ValidationError
 from .paths import ProjectPaths, resolve_paths
 from .validation import MAX_JSON_BYTES, canonical_json, command_id, task_id, text
@@ -64,6 +65,22 @@ TOOLS: tuple[dict[str, object], ...] = (
         "title": "Read Diamond project status",
         "description": "Read provider version probes and persisted workflow and delivery projections.",
         "inputSchema": _schema({}),
+        "annotations": READ_ONLY_ANNOTATIONS,
+    },
+    {
+        "name": "diamond_route_status",
+        "title": "Explain Diamond provider routes",
+        "description": "Explain every configured role route without launching a provider or changing ledger state.",
+        "inputSchema": _schema({}),
+        "annotations": READ_ONLY_ANNOTATIONS,
+    },
+    {
+        "name": "diamond_explain_route",
+        "title": "Explain one Diamond provider route",
+        "description": "Inspect one role's primary, fallbacks, executable reachability, health, and authorization status.",
+        "inputSchema": _schema({
+            "role": {"type": "string", "enum": [role.value for role in Role]},
+        }, ["role"]),
         "annotations": READ_ONLY_ANNOTATIONS,
     },
     {
@@ -291,6 +308,16 @@ class McpServer:
         elif name == "diamond_project_status":
             _no_arguments(args)
             command = ["project", "status"]
+        elif name == "diamond_route_status":
+            _no_arguments(args)
+            command = ["route", "status"]
+        elif name == "diamond_explain_route":
+            role_value = _required_text(args, "role", 32)
+            try:
+                role = Role(role_value)
+            except ValueError as exc:
+                raise McpRequestError(f"unknown role: {role_value}") from exc
+            command = ["route", "explain", "--role", role.value]
         elif name == "diamond_list_workflows":
             _no_arguments(args)
             command = ["workflow", "list"]

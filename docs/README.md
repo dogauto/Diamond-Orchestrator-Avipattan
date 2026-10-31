@@ -11,9 +11,12 @@ review, and deterministic adapter/packet slices are implemented. See
 | --- | --- |
 | [Project aim](aim/PROJECT_AIM.md) | Objective, delivery order, scope and success criteria |
 | [System design](architecture/SYSTEM_DESIGN.md) | Python modules, contracts, SQLite state, adapters and recovery |
+| [Provider extensibility](architecture/PROVIDER_EXTENSIBILITY.md) | Generic adapter contract, bounded discovery, registry, and capability routing |
 | [Roles and skills](architecture/ROLES_AND_SKILLS.md) | Assignments, bounded work, skill provenance and independent review |
 | [Implementation plan](plan/IMPLEMENTATION_PLAN.md) | Seven milestones and first authorized implementation slice |
 | [Dynamic agents plan](plan/DYNAMIC_AGENTS_PLAN.md) | Council-advised profile composition, provider routing, daily improvement, and acceptance milestones |
+| [Agent-skills adoption plan](plan/AGENT_SKILLS_ADOPTION.md) | Pinned control-plane guidance, Diamond mappings, boundaries, and rollback |
+| [Ruflo learnings](plan/RUFLO_LEARNINGS.md) | Safe orchestration patterns adopted from Ruflo and explicitly rejected boundaries |
 | [Dynamic agents Council record](decisions/dynamic-agents-2026-10-12/README.md) | Verdict, tradeoffs, unresolved questions, and recorded deliberation |
 | [Phase gates](verification/PHASE_GATES.md) | Purpose, checks, evidence, pass/fail/block rules per phase |
 | [Acceptance criteria](verification/ACCEPTANCE_CRITERIA.md) | Falsifiable foundation, fault, live and release requirements |
@@ -26,10 +29,15 @@ then the separately approved actual Astro project.
 
 ## Project materials and ownership
 
-- `docs/`: planning, decisions, verification summaries, progress; no root docs.
+- `docs/`: planning, decisions, verification summaries, and progress.
 - `config/diamond.toml`: portable configuration, no credentials or model IDs.
 - `config/skills/`: pinned, MIT-licensed advisory skill sources and provenance
   catalog; changed source bytes block packet preparation.
+- `config/control-plane/agent-skills.toml`: pinned upstream guidance selected
+  for control-plane review only; it is not a worker catalog and is not loaded at
+  runtime.
+- `CONSTRAINTS.md`: Diamond-specific quality, authority, evidence, and recovery
+  contract.
 - `src/`, `tests/`, `scripts/`, `examples/`: runtime and verification code.
 - Runtime state: `.diamond/diamond.sqlite3` and an evidence area
   beside it. These are runtime-generated materials, not created by these docs.
@@ -95,7 +103,7 @@ Configure an MCP client to launch:
 
 The transport is newline-delimited JSON-RPC. The client must complete the MCP
 `initialize` handshake before using tools. Read-only tools inspect project
-status, workflows, immutable events, deliveries, and configuration. Mutating
+status, routes, workflows, immutable events, deliveries, and configuration. Mutating
 tools require `confirm: true` and remain subject to the same controller gates;
 client-side human approval is still required before provider execution.
 

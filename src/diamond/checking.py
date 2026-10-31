@@ -22,9 +22,20 @@ def main() -> int:
         if len(contents.splitlines()) > 500:
             print(f"FAIL: {source} exceeds 500 lines", file=sys.stderr)
             return 1
+    # Verify orchestration policy
+    config_path = root / "config" / "diamond.toml"
+    if config_path.exists():
+        try:
+            from .orchestration import verify_policy
+            report = verify_policy(config_path, root)
+            if not report["ok"]:
+                print(f"WARNING: orchestration policy issues: {report['issues']}", file=sys.stderr)
+        except Exception as exc:
+            print(f"WARNING: orchestration check failed: {exc}", file=sys.stderr)
     print(f"PASS: {count} tests; {len(sources)} Python files compiled in memory; no bytecode files written")
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

@@ -33,7 +33,8 @@ class McpTests(ProjectCase):
         response = server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
         names = {tool["name"] for tool in response["result"]["tools"]}
         self.assertEqual(names, {
-            "diamond_validate_config", "diamond_project_status", "diamond_list_workflows",
+            "diamond_validate_config", "diamond_project_status", "diamond_route_status", "diamond_explain_route",
+            "diamond_list_workflows",
             "diamond_get_workflow", "diamond_get_workflow_events", "diamond_list_deliveries",
             "diamond_get_delivery", "diamond_create_workflow", "diamond_run_workflow_step",
             "diamond_reconcile_workflow",
@@ -51,6 +52,28 @@ class McpTests(ProjectCase):
         })
         self.assertFalse(response["result"]["isError"])
         self.assertTrue(response["result"]["structuredContent"]["ok"])
+        self.assertFalse((self.project / ".diamond").exists())
+
+    def test_route_tools_are_read_only_and_delegate_fixed_controller_commands(self) -> None:
+        calls = []
+
+        def invoke(command):
+            calls.append(command)
+            return 0, {"schema_version": 1, "ok": True, "result": {"routes": []}}
+
+        server = self.make_server(invoke)
+        self.initialize(server)
+        status = server.handle({
+            "jsonrpc": "2.0", "id": 31, "method": "tools/call",
+            "params": {"name": "diamond_route_status", "arguments": {}},
+        })
+        explain = server.handle({
+            "jsonrpc": "2.0", "id": 32, "method": "tools/call",
+            "params": {"name": "diamond_explain_route", "arguments": {"role": "builder"}},
+        })
+        self.assertFalse(status["result"]["isError"])
+        self.assertFalse(explain["result"]["isError"])
+        self.assertEqual(calls, [["route", "status"], ["route", "explain", "--role", "builder"]])
         self.assertFalse((self.project / ".diamond").exists())
 
     def test_mutating_tools_require_explicit_confirmation_and_use_fixed_commands(self) -> None:

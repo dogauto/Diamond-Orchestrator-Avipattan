@@ -38,7 +38,6 @@ def reason() -> str:
     return _real_cli_state.reason
 
 
-# Convenience: skip decorator for tests
 def skip_unless_real_cli(test_func):
     """Decorator that skips the test unless DIAMOND_REAL_CLI is enabled."""
     import functools
@@ -49,6 +48,3 @@ def skip_unless_real_cli(test_func):
             raise unittest.SkipTest(reason())
         return test_func(*args, **kwargs)
     return wrapper
-
-
-# skip_if_not_real_cli = skip_unless_real_cli  # alias
