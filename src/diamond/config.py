@@ -56,7 +56,7 @@ class DiamondConfig:
             raise ValidationError("providers and roles must be mappings")
         providers, roles = dict(self.providers), dict(self.roles)
         if set(providers) != set(Provider) or not all(isinstance(key, Provider) for key in providers):
-            raise ValidationError("configuration requires exactly six Provider enum keys")
+            raise ValidationError("configuration requires exactly seven Provider enum keys")
         if not all(isinstance(value, ProviderConfig) for value in providers.values()):
             raise ValidationError("provider entries must be ProviderConfig values")
         if set(roles) != set(Role) or not all(isinstance(key, Role) for key in roles):
@@ -83,7 +83,10 @@ def parse_config(source: str) -> DiamondConfig:
             raise ConfigError("config source must be at most 1 MiB of UTF-8 text")
         data = exact_keys(tomllib.loads(source), {"schema_version", "project_name", "controller", "providers", "roles"}, "config")
         controller = ControllerConfig(**exact_keys(data["controller"], {"max_workers", "task_timeout_seconds", "correction_round_limit"}, "controller"))
-        provider_data = exact_keys(data["providers"], {provider.value for provider in Provider}, "providers")
+        provider_data = dict(data["providers"])
+        if "freellmapi" not in provider_data:
+            provider_data["freellmapi"] = {"executable": "freellmapi", "enabled": False}
+        provider_data = exact_keys(provider_data, {provider.value for provider in Provider}, "providers")
         providers = {provider: ProviderConfig(**exact_keys(provider_data[provider.value], {"executable", "enabled"}, f"providers.{provider.value}")) for provider in Provider}
         role_data = exact_keys(data["roles"], {role.value for role in Role}, "roles")
         roles = {role: Provider(role_data[role.value]) for role in Role}

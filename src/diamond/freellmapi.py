@@ -18,6 +18,7 @@ from .validation import text
 
 MAX_CONFIG_BYTES = 16_384
 MAX_MODELS = 256
+MAX_READINESS_MODELS = 4096
 MAX_PROMPT_LENGTH = 16_384
 API_KEY_ENV_PATTERN = re.compile(r"[A-Z_][A-Z0-9_]{0,127}\Z")
 MODEL_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+\-]{0,255}\Z")
@@ -222,6 +223,22 @@ class FreeLLMAPIClient:
                 raise ProviderError("FreeLLMAPI returned an invalid model entry")
             models.append(self._reported_id(entry.get("id")))
         return tuple(dict.fromkeys(models))
+
+    def readiness(self) -> None:
+        """Perform one bounded authenticated non-inference gateway check.
+
+        Diagnostic catalog display deliberately has a smaller presentation
+        limit. Runtime readiness must not reject a healthy gateway merely
+        because its catalog is larger than that display limit.
+        """
+        payload = self._request("/models")
+        entries = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(entries, list) or len(entries) > MAX_READINESS_MODELS:
+            raise ProviderError("FreeLLMAPI readiness response is invalid or too large")
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise ProviderError("FreeLLMAPI readiness response contains an invalid model entry")
+            self._reported_id(entry.get("id"))
 
     def smoke(self, model: str, prompt: str = SMOKE_PROMPT) -> FreeLLMAPIProbe:
         explicit_model(model)

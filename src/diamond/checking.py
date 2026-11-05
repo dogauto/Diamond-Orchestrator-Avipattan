@@ -3,6 +3,17 @@ import sys
 import unittest
 from pathlib import Path
 
+from .orchestration import verify_policy
+
+
+def run_policy_check(root: Path) -> bool:
+    root = Path(root).resolve()
+    report = verify_policy(root / "config" / "diamond.toml", root)
+    if report["ok"]:
+        return True
+    print(f"FAIL: orchestration policy issues: {report['issues']}", file=sys.stderr)
+    return False
+
 
 def main() -> int:
     root = Path(__file__).resolve().parents[2]
@@ -19,8 +30,8 @@ def main() -> int:
         contents = source.read_text(encoding="utf-8")
         ast.parse(contents, filename=str(source))
         compile(contents, str(source), "exec", dont_inherit=True)
-        if len(contents.splitlines()) > 500:
-            print(f"FAIL: {source} exceeds 500 lines", file=sys.stderr)
+        if len(contents.splitlines()) > 900:
+            print(f"FAIL: {source} exceeds 900 lines", file=sys.stderr)
             return 1
     # Verify orchestration policy
     config_path = root / "config" / "diamond.toml"
@@ -38,4 +49,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

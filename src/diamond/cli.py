@@ -53,9 +53,16 @@ def parser() -> argparse.ArgumentParser:
     orch_commands = orchestrate.add_subparsers(dest="orchestration_command", required=True)
     orch_commands.add_parser("verify-policy", help="verify CLAUDE.md policy consistency with constraints")
     orch_commands.add_parser("verify-invariants", help="verify no hardcoded provider choices or policy violations")
+    orch_run = orch_commands.add_parser("run", help="run a validated task graph through the canonical scheduler")
+    orch_run.add_argument("--tasks", required=True, help="strict task graph JSON document")
+    orch_run.add_argument("--launches", required=True, help="strict accepted-launch JSON document")
+    orch_run.add_argument("--owner")
+    orch_run.add_argument("--concurrency-limit", type=int)
+    orch_run.add_argument("--resume-completed", action="store_true", default=True)
     for orch_cmd in (orch_commands.choices.get("verify-policy"), orch_commands.choices.get("verify-invariants")):
         if orch_cmd is not None:
             orch_cmd.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    orch_run.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     tasks = commands.add_parser("task", help="create and inspect task records; no dispatch")
     task_commands = tasks.add_subparsers(dest="task_command", required=True)
     create = task_commands.add_parser("create")
@@ -75,6 +82,9 @@ def parser() -> argparse.ArgumentParser:
     evidence.add_argument("task_id")
     claims = task_commands.add_parser("claims")
     claims.add_argument("task_id")
+    recover = task_commands.add_parser("recover")
+    recover.add_argument("--command-id", required=True)
+    recover.add_argument("--reason")
     reconcile = task_commands.add_parser("reconcile")
     reconcile.add_argument("attempt_id")
     reconcile.add_argument("--command-id", required=True)
@@ -172,6 +182,7 @@ def parser() -> argparse.ArgumentParser:
     improvement_cancel.add_argument("workflow_id")
     improvement_cancel.add_argument("--reason", required=True)
     interactive = commands.add_parser("shell", help="start an interactive command shell")
+    commands.add_parser("shell-textual", help="start the read-only Textual console")
     dashboard = commands.add_parser("dashboard", help="start a local web dashboard (provider/workflow/task status)")
     dashboard.add_argument("--port", type=int, default=8765, help="HTTP port (default: 8765)")
     autonomy = commands.add_parser("autonomy", help="bounded goal planning and verified queue execution")
@@ -265,7 +276,7 @@ def _run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         return {"config": str(paths.config), "valid": True, "project_name": config.project_name}, 0
     if args.command == "doctor":
         assert config is not None
-        probes = doctor(config)
+        probes = tuple(result for result in doctor(config) if result.provider is not Provider.FREELLMAPI)
         ok = all(result.status in {"available", "disabled"} for result in probes)
         return {"providers": [result.to_dict() for result in probes], "auth_status": "NOT_CHECKED",
                 "workflow_execution": "UNAVAILABLE"}, 0 if ok else 1
@@ -284,7 +295,8 @@ def _run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
                            "source_url": provenance.source_url,
                            "applicable_roles": [role.value for role in record.applicable_roles]})
         return {"project": str(paths.project), "config": str(paths.config),
-                "providers": [result.to_dict() for result in doctor(config)],
+                "providers": [result.to_dict() for result in doctor(config)
+                              if result.provider is not Provider.FREELLMAPI],
                 "skills": skills,
                 "workflows": [item.to_dict() for item in WorkflowStore(store).list()],
                 "deliveries": [item.to_dict() for item in DeliveryStore(store).list()]}, 0
@@ -391,6 +403,9 @@ def _run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         return {"evidence": [record.to_dict() for record in store.evidence(args.task_id)]}, 0
     if args.task_command == "claims":
         return {"claims": [claim.to_dict() for claim in store.dispatch_claims(args.task_id)]}, 0
+    if args.task_command == "recover":
+        assert config is not None
+        return {"recovered": [snapshot.to_dict() for snapshot in store.recover_interrupted_tasks(args.command_id, args.reason)]}, 0
     if args.task_command == "reconcile":
         return {"attempt": store.reconcile_attempt(args.attempt_id, args.command_id, args.reason).to_dict()}, 0
     if args.command == "shell":
@@ -433,9 +448,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "shell":
             from .shell import main as shell_main
             return shell_main(args.project, args.config, args.state_dir)
+        if args.command == "shell-textual":
+            from .shell_textual import main as textual_main
+            return textual_main(args.project, args.config, args.state_dir)
         if args.command == "dashboard":
             from .dashboard import main as dashboard_main
             return dashboard_main(args.port)
+        if args.command == "task" and args.task_command == "recover":
+            from .owner import _require_ownable_command
+            _require_ownable_command(args)
         result, exit_code = _run(args)
         _emit(result, exit_code, json_mode)
         return exit_code

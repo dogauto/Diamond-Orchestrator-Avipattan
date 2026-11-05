@@ -7,7 +7,12 @@ from typing import Iterator
 from uuid import uuid4
 
 from .dispatch import DispatchClaim, acquire_start, reserve
+from .capability_store import CapabilityBindingStoreMixin
 from .domain import FOUNDATION_STATES, LedgerEvent, TaskSnapshot, TaskSpec, TaskStatus
+from .execution_store import ExecutionStateStoreMixin
+from .provider_store import ProviderMetadataStoreMixin
+from .runtime_store import AgentRuntimeStoreMixin
+from .runtime_messaging import AgentMessagingStoreMixin
 from .evidence import AttemptStatus, EvidenceRecord, ExecutionAttempt, digest_text, redact_text, validate_attempt_update
 from .errors import (CommandConflictError, ConflictError, ExecutionGuardError,
                      NotFoundError, StorageError, ValidationError)
@@ -20,7 +25,8 @@ from .validation import (bounded_int, canonical_json, command_id as validate_com
                          parse_canonical_json, task_id as validate_task_id, text, utc_now)
 
 
-class EventStore:
+class EventStore(CapabilityBindingStoreMixin, ProviderMetadataStoreMixin, ExecutionStateStoreMixin,
+                 AgentRuntimeStoreMixin, AgentMessagingStoreMixin):
     def __init__(self, database: Path, busy_timeout_ms: int = 5000) -> None:
         if not isinstance(database, Path) or not database.is_absolute():
             raise ValidationError("database must be an absolute pathlib.Path")
@@ -56,14 +62,18 @@ class EventStore:
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA foreign_keys=ON")
             connection.execute(f"PRAGMA busy_timeout={self.busy_timeout_ms}")
-            if write:
+            if write and not migrate:
                 connection.execute("PRAGMA synchronous=FULL")
                 connection.execute("BEGIN IMMEDIATE")
+            elif write:
+                connection.execute("PRAGMA synchronous=FULL")
+                connection.execute("PRAGMA foreign_keys=OFF")
             else:
                 connection.execute("PRAGMA query_only=ON")
                 connection.execute("BEGIN")
             if migrate:
                 migrate_schema(connection)
+                connection.execute("PRAGMA foreign_keys=ON")
             check_schema(connection, initialize=write and not migrate)
             yield connection
             if write:
@@ -92,6 +102,12 @@ class EventStore:
         snapshot = self._decode_snapshot(row["snapshot_json"])
         if snapshot.spec.task_id != row["task_id"] or snapshot.revision != row["revision"] or snapshot.status.value != row["status"]:
             raise StorageError("task projection columns disagree with its immutable snapshot")
+        workspace = connection.execute(
+            "SELECT workspace_root FROM attempts WHERE task_id=? ORDER BY created_at DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        if workspace is not None and snapshot.spec.workspace_root_value != workspace["workspace_root"]:
+            snapshot = replace(snapshot, spec=replace(snapshot.spec, workspace_root_value=workspace["workspace_root"]))
         return snapshot
 
     def _deduplicated(self, connection: sqlite3.Connection, command_id: str, request: str) -> TaskSnapshot | None:
@@ -194,18 +210,39 @@ class EventStore:
             except (ValidationError, TypeError) as exc:
                 raise StorageError(f"invalid persisted event: {exc}") from exc
 
+    def events_since(self, task_id: str, revision: int) -> tuple[LedgerEvent, ...]:
+        validate_task_id(task_id)
+        bounded_int(revision, "event cursor revision", 0, 2**63 - 1)
+        if not self._database_present():
+            raise NotFoundError(f"task {task_id} does not exist; no ledger has been created")
+        with self._connection(write=False) as connection:
+            self._read_task(connection, task_id)
+            rows = connection.execute(
+                "SELECT * FROM events WHERE task_id=? AND revision>? ORDER BY revision",
+                (task_id, revision),
+            ).fetchall()
+            try:
+                return tuple(LedgerEvent(**dict(row)) for row in rows)
+            except (ValidationError, TypeError) as exc:
+                raise StorageError(f"invalid persisted event: {exc}") from exc
+
     def replay(self, task_id: str) -> TaskSnapshot:
         return replay_events(self.events(task_id))
 
     @staticmethod
     def _attempt_values(attempt: ExecutionAttempt) -> tuple[object, ...]:
+        return EventStore._attempt_values_full(attempt)[:-2]
+
+    @staticmethod
+    def _attempt_values_full(attempt: ExecutionAttempt) -> tuple[object, ...]:
         return (attempt.attempt_id, attempt.schema_version, attempt.task_id, attempt.task_revision,
                 attempt.role.value, attempt.provider.value, attempt.executable, attempt.workspace_root,
                 attempt.status.value, attempt.requested_model, attempt.cli_version,
                 attempt.provider_session_id, attempt.reported_model, attempt.created_at,
                 attempt.started_at, attempt.completed_at, attempt.returncode, attempt.signal,
                 attempt.stdout_bytes, attempt.stderr_bytes, attempt.stdout_sha256,
-                attempt.stderr_sha256, attempt.result_status, attempt.detail, attempt.revision)
+                attempt.stderr_sha256, attempt.result_status, attempt.detail, attempt.revision,
+                attempt.accepted_packet_id, attempt.provider_binding_digest, attempt.provider_id, attempt.adapter_id)
 
     @staticmethod
     def _decode_attempt(row: sqlite3.Row) -> ExecutionAttempt:
@@ -262,8 +299,15 @@ class EventStore:
             return attempt
 
     def reserve_dispatch(self, packet: TaskPacket, attempt: ExecutionAttempt, owner: str,
-                         command_id: str, max_workers: int = 2) -> tuple[DispatchClaim, ExecutionAttempt]:
-        return reserve(self, packet, attempt, owner, command_id, max_workers)
+                         command_id: str, max_workers: int = 2, *, provider_metadata=None,
+                         available_capabilities: tuple[str, ...] = (), available_tools: tuple[str, ...] = (),
+                         permission_mode: str = "plan", dependencies_satisfied: bool = False) -> tuple[DispatchClaim, ExecutionAttempt]:
+        return reserve(self, packet, attempt, owner, command_id, max_workers,
+                       provider_metadata=provider_metadata,
+                       available_capabilities=available_capabilities,
+                       available_tools=available_tools,
+                       permission_mode=permission_mode,
+                       dependencies_satisfied=dependencies_satisfied)
 
     def acquire_start(self, claim: DispatchClaim, command_id: str) -> ExecutionAttempt:
         return acquire_start(self, claim, command_id)
@@ -296,15 +340,7 @@ class EventStore:
 
     def _insert_attempt(self, connection: sqlite3.Connection, attempt: ExecutionAttempt,
                         command_id: str, request: str) -> None:
-        if redact_text(canonical_json(attempt.to_dict())) != canonical_json(attempt.to_dict()):
-            raise ValidationError("attempt contains unredacted credential-like text")
-        connection.execute("""INSERT INTO attempts
-            (attempt_id,schema_version,task_id,task_revision,role,provider,executable,workspace_root,status,
-             requested_model,cli_version,provider_session_id,reported_model,created_at,started_at,completed_at,
-             returncode,signal,stdout_bytes,stderr_bytes,stdout_sha256,stderr_sha256,result_status,detail,revision)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", self._attempt_values(attempt))
-        connection.execute("INSERT INTO attempt_commands VALUES (?,?,?,?)",
-                           (command_id, attempt.attempt_id, request, canonical_json(attempt.to_dict())))
+        ProviderMetadataStoreMixin._insert_attempt(self, connection, attempt, command_id, request)
 
     def _write_attempt(self, connection: sqlite3.Connection, attempt: ExecutionAttempt,
                        expected_revision: int, command_id: str, request: str) -> None:
@@ -319,8 +355,9 @@ class EventStore:
         cursor = connection.execute("""UPDATE attempts SET schema_version=?,task_id=?,task_revision=?,role=?,provider=?,
             executable=?,workspace_root=?,status=?,requested_model=?,cli_version=?,provider_session_id=?,reported_model=?,
             created_at=?,started_at=?,completed_at=?,returncode=?,signal=?,stdout_bytes=?,stderr_bytes=?,stdout_sha256=?,
-            stderr_sha256=?,result_status=?,detail=?,revision=? WHERE attempt_id=? AND revision=?""",
-            (*self._attempt_values(attempt)[1:], attempt.attempt_id, expected_revision))
+            stderr_sha256=?,result_status=?,detail=?,revision=?,accepted_packet_id=?,provider_binding_digest=?,
+            provider_id=?,adapter_id=? WHERE attempt_id=? AND revision=?""",
+            (*self._attempt_values_full(attempt)[1:], attempt.attempt_id, expected_revision))
         if cursor.rowcount != 1:
             raise ConflictError("attempt changed concurrently; reload its revision")
         connection.execute("INSERT INTO attempt_commands VALUES (?,?,?,?)",
@@ -375,24 +412,60 @@ class EventStore:
                     raise CommandConflictError(f"command {command_id} already committed different input")
                 return ExecutionAttempt.from_dict(parse_canonical_json(previous["attempt_json"]))
             current = self._read_attempt(connection, attempt_id)
-            rows = connection.execute("SELECT * FROM attempt_evidence WHERE attempt_id=? AND kind='process_started'",
-                                      (attempt_id,)).fetchall()
-            identity = None
-            if rows:
-                payload = self._decode_evidence(rows[-1]).to_dict()["payload"]
-                if payload.get("identity") is not None:
-                    identity = ProcessIdentity(**payload["identity"])
+            # Read structured termination evidence from the attempt's evidence records
+            term_rows = connection.execute(
+                "SELECT * FROM attempt_evidence WHERE attempt_id=? AND kind IN ('process_terminated', 'process_group_terminated', 'cleanup_complete')",
+                (attempt_id,)).fetchall()
+            termination_evidence = {}
+            for row in term_rows:
+                payload = self._decode_evidence(row).to_dict()["payload"]
+                termination_evidence[row["kind"]] = payload
+
+            # Determine status based on structured termination evidence
+            # 1. Check if process was terminated with signal
+            process_terminated = termination_evidence.get('process_terminated', {})
+            signal = process_terminated.get('signal')
+            process_terminated_with_signal = signal is not None and signal != 0
+
+            # 2. Check if process group was terminated
+            process_group_terminated = termination_evidence.get('process_group_terminated', {})
+            group_terminated = process_group_terminated.get('group_terminated', False)
+
+            # 3. Check if cleanup was completed
+            cleanup_complete = termination_evidence.get('cleanup_complete', {})
+            cleanup_done = cleanup_complete.get('cleanup_complete', False)
+
+            # Decision logic:
+            # - If process was terminated with signal AND group terminated AND cleanup complete -> CANCELLED
+            # - If any of these are missing -> AMBIGUOUS (preserve uncertainty)
+            # - If only some are present but not all -> AMBIGUOUS
+
             timestamp = utc_now()
-            payload = canonical_json({"reason": reason, **observe(identity)})
-            evidence = EvidenceRecord(uuid4().hex, attempt_id, "recovery_observation", timestamp, payload, digest_text(payload))
             if current.status in {AttemptStatus.INTENDED, AttemptStatus.STARTED}:
-                target = replace(current, status=AttemptStatus.AMBIGUOUS, completed_at=timestamp,
+                if process_terminated_with_signal and group_terminated and cleanup_done:
+                    new_status = AttemptStatus.CANCELLED
+                else:
+                    new_status = AttemptStatus.AMBIGUOUS
+
+                payload = canonical_json({"reason": reason, "relaunch_allowed": False, **termination_evidence})
+                evidence = EvidenceRecord(uuid4().hex, attempt_id, "recovery_observation", timestamp, payload, digest_text(payload))
+                target = replace(current, status=new_status, completed_at=timestamp,
+                                 detail=reason, revision=current.revision + 1)
+                self._write_attempt(connection, target, current.revision, command_id, request)
+            elif current.status is AttemptStatus.AMBIGUOUS and process_terminated_with_signal and group_terminated and cleanup_done:
+                # Upgrade AMBIGUOUS to CANCELLED when termination evidence proves clean cancellation.
+                new_status = AttemptStatus.CANCELLED
+                payload = canonical_json({"reason": reason, "relaunch_allowed": False, **termination_evidence})
+                evidence = EvidenceRecord(uuid4().hex, attempt_id, "recovery_observation", timestamp, payload, digest_text(payload))
+                target = replace(current, status=new_status, completed_at=timestamp,
                                  detail=reason, revision=current.revision + 1)
                 self._write_attempt(connection, target, current.revision, command_id, request)
             else:
                 target = current
                 connection.execute("INSERT INTO attempt_commands VALUES (?,?,?,?)",
                                    (command_id, attempt_id, request, canonical_json(target.to_dict())))
+                payload = canonical_json({"reason": reason, "relaunch_allowed": False, **termination_evidence})
+                evidence = EvidenceRecord(uuid4().hex, attempt_id, "recovery_observation", timestamp, payload, digest_text(payload))
             self._insert_evidence(connection, evidence, f"{command_id}:observation",
                                   canonical_json({"operation": "recovery_observation", "digest": evidence.digest_sha256}))
             return target
@@ -425,8 +498,13 @@ class EventStore:
             task = self._read_task(connection, attempt.task_id)
             if task.revision != attempt.task_revision or task.status is not TaskStatus.CREATED:
                 if attempt.status is not AttemptStatus.AMBIGUOUS:
-                    attempt = replace(attempt, status=AttemptStatus.FAILED,
-                                      detail="late result retained; task authorization changed during execution")
+                    # Task revision may have changed due to begin_execution/complete_execution
+                    # as long as the task is still in CREATED foundation state
+                    if task.status is TaskStatus.CREATED:
+                        pass  # Allow revision change due to execution state updates
+                    else:
+                        attempt = replace(attempt, status=AttemptStatus.FAILED,
+                                          detail="late result retained; task authorization changed during execution")
             self._write_attempt(connection, attempt, current.revision, command_id, request)
             self._insert_evidence(connection, evidence, f"{command_id}:evidence",
                                   canonical_json({"operation": "evidence_record", "evidence": evidence.to_dict()}))
@@ -443,8 +521,30 @@ class EventStore:
         if not isinstance(evidence, EvidenceRecord):
             raise ValidationError("record_evidence requires a validated EvidenceRecord")
         validate_command_id(command_id)
-        request = canonical_json({"operation": "evidence_record", "evidence": evidence.to_dict()})
         with self._connection(write=True) as connection:
+            session_id = evidence.attempt_id
+            if connection.execute("SELECT 1 FROM attempts WHERE attempt_id=?", (evidence.attempt_id,)).fetchone() is None:
+                session_attempt = connection.execute(
+                    """SELECT agent_identities.attempt_id
+                       FROM agent_sessions
+                       JOIN agent_identities USING(agent_id)
+                      WHERE agent_sessions.session_id=?""",
+                    (evidence.attempt_id,),
+                ).fetchone()
+                if session_attempt is None or session_attempt["attempt_id"] is None:
+                    raise NotFoundError(f"attempt {evidence.attempt_id} does not exist")
+                evidence = replace(evidence, attempt_id=session_attempt["attempt_id"])
+            if evidence.kind == "child_completion":
+                payload = parse_canonical_json(evidence.payload_json)
+                if payload.get("identity_verified") is True:
+                    connection.execute(
+                        """UPDATE agent_sessions
+                           SET identity_verified=1, verified_identity_digest=?,
+                               updated_at=?, revision=revision+1
+                         WHERE session_id=?""",
+                        (evidence.digest_sha256, utc_now(), session_id),
+                    )
+            request = canonical_json({"operation": "evidence_record", "evidence": evidence.to_dict()})
             previous = connection.execute("SELECT request_json, evidence_id FROM attempt_evidence WHERE command_id=?",
                                           (command_id,)).fetchone()
             if previous is not None:
@@ -455,8 +555,6 @@ class EventStore:
                 if row is None:
                     raise StorageError("evidence command points to missing evidence")
                 return self._decode_evidence(row)
-            if connection.execute("SELECT 1 FROM attempts WHERE attempt_id=?", (evidence.attempt_id,)).fetchone() is None:
-                raise NotFoundError(f"attempt {evidence.attempt_id} does not exist")
             self._insert_evidence(connection, evidence, command_id, request)
             return evidence
 

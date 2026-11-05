@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 from uuid import uuid4
 
-from diamond.domain import Provider, Role, TaskSpec
+from diamond.domain import Provider, Role, TaskSpec, TaskStatus
 from diamond.errors import ConflictError, ExecutionGuardError, StorageError, ValidationError
 from diamond.evidence import AttemptStatus, digest_text
 from diamond.integration import capture_components, integration_response
@@ -258,6 +258,33 @@ print(json.dumps({{'result':json.dumps(response),'session_id':session}}))
             connection.execute("UPDATE attempts SET provider_session_id=? WHERE attempt_id=?", ("forged-session", snapshot.active_attempt_id))
         with self.assertRaises(StorageError):
             self.capture(snapshot)
+
+    def test_authorization_bound_to_immutable_creation_revision(self) -> None:
+        """A verified workflow author remains valid even after task revision advances
+        through execution-state updates (begin_execution/complete_execution) while
+        the task stays in CREATED foundation state."""
+        snapshot = self.build()
+        # Verify the task is CREATED and its revision has advanced past creation
+        task = self.ledger.replay(snapshot.active_task_id)
+        self.assertTrue(task.status is TaskStatus.CREATED)
+        self.assertGreater(task.revision, 1, "task revision must have advanced beyond creation")
+        creation_revision = 1  # TASK_CREATED is always revision 1
+        self.assertNotEqual(task.revision, creation_revision, "revision must have advanced due to execution updates")
+        # The attempt is bound to creation_revision, not current revision
+        attempt = self.ledger.replay_attempt(snapshot.active_attempt_id)
+        self.assertEqual(attempt.task_revision, creation_revision)
+        # capture_components must succeed — the author is still the valid one
+        captured = self.capture(snapshot)
+        component = json.loads(captured)[0]
+        self.assertEqual(component["authors"][0]["attempt_id"], snapshot.active_attempt_id)
+        self.assertEqual(component["authors"][0]["task_id"], snapshot.active_task_id)
+        # A genuinely mismatched attempt (task_revision diverging from the immutable
+        # creation revision) must still be rejected by the authorization guard.
+        from diamond.integration import _author
+        identity = {"task_id": snapshot.active_task_id, "attempt_id": snapshot.active_attempt_id}
+        with patch("diamond.integration._creation_revision", return_value=attempt.task_revision + 1):
+            with self.assertRaisesRegex(ConflictError, "immutable creation"):
+                _author(self.ledger, snapshot, identity, Role.BUILDER)
 
     def test_unchanged_owned_file_is_omitted_and_no_change_component_is_rejected(self) -> None:
         (self.target / "src/other.py").write_text("def value(): return 42\n")

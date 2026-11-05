@@ -56,6 +56,12 @@ class FreeLLMAPIUnitTests(TestCase):
             request.assert_called_once_with("http://127.0.0.1:31415/v1/models", KEY, None, 10.0)
             self.assertEqual(client.auth_status, "PRESENT_NOT_CHECKED")
 
+    def test_runtime_readiness_accepts_a_catalog_larger_than_diagnostic_display_limit(self):
+        payload = {"data": [{"id": f"model-{index}"} for index in range(257)]}
+        with patch("diamond.freellmapi.request_json", return_value=payload) as request:
+            self.assertIsNone(self.client().readiness())
+        request.assert_called_once_with("http://127.0.0.1:31415/v1/models", KEY, None, 10.0)
+
     def test_missing_invalid_credentials_and_secret_configuration_fail_before_transport(self):
         with patch("diamond.freellmapi.request_json") as request:
             for key in ("", " ", "line\nbreak", "x\ty", "x" * 4097, "非ASCII"):

@@ -48,7 +48,8 @@ def validate_attempt_update(previous: "ExecutionAttempt", target: "ExecutionAtte
         raise ValidationError(f"cannot update attempt {previous.status.value} to {target.status.value}")
     if any(getattr(previous, name) != getattr(target, name)
            for name in ("attempt_id", "schema_version", "task_id", "task_revision", "role", "provider", "executable",
-                        "workspace_root", "requested_model", "cli_version", "created_at")):
+                         "workspace_root", "requested_model", "cli_version", "created_at", "accepted_packet_id",
+                         "provider_binding_digest", "provider_id", "adapter_id")):
         raise ValidationError("attempt identity and launch intent are immutable")
     if target.status is AttemptStatus.STARTED and target.started_at is None:
         raise ValidationError("STARTED attempts require started_at")
@@ -119,6 +120,10 @@ class ExecutionAttempt:
     detail: str = ""
     revision: int = 1
     schema_version: int = 1
+    accepted_packet_id: str | None = None
+    provider_binding_digest: str | None = None
+    provider_id: str | None = None
+    adapter_id: str | None = None
 
     def __post_init__(self) -> None:
         task_id(self.attempt_id)
@@ -143,6 +148,20 @@ class ExecutionAttempt:
                                      (self.result_status, "result status", 128)):
             if value is not None:
                 text(value, name, maximum)
+        if self.accepted_packet_id is not None:
+            task_id(self.accepted_packet_id)
+        for value, name in ((self.provider_binding_digest, "provider binding digest"),):
+            if value is not None and _DIGEST.fullmatch(value) is None:
+                raise ValidationError(f"{name} must be a lowercase SHA-256 digest")
+        if self.provider_id is not None:
+            from .provider_contracts import provider_identifier
+            provider_identifier(self.provider_id)
+        if self.adapter_id is not None:
+            text(self.adapter_id, "adapter ID", 256)
+        if (self.accepted_packet_id is None) != (self.provider_binding_digest is None):
+            raise ValidationError("accepted packet and provider binding digest must be supplied together")
+        if self.accepted_packet_id is not None and (self.provider_id is None or self.adapter_id is None):
+            raise ValidationError("accepted provider bindings require provider and adapter identities")
         if self.returncode is not None and type(self.returncode) is not int:
             raise ValidationError("attempt returncode must be an integer or None")
         if self.signal is not None:
@@ -183,7 +202,7 @@ class EvidenceRecord:
     schema_version: int = 1
 
     def __post_init__(self) -> None:
-        task_id(self.evidence_id)
+        text(self.evidence_id, "evidence ID", 256)
         task_id(self.attempt_id)
         text(self.kind, "evidence kind", 128)
         utc_timestamp(self.created_at)

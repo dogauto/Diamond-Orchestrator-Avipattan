@@ -260,7 +260,13 @@ def request_task(
         raise RuntimeError("Real CLI integration not enabled")
 
     if agent not in ("claude", "codex"):
-        raise ValidationError(f"agent must be 'claude' or 'codex', got '{agent}'")
+        return RealCLIResponse(
+            correlation_id=correlation_id,
+            task_id=task_id,
+            agent=agent,
+            status="unavailable",
+            metadata=metadata or {},
+        )
 
     # Send request based on agent type
     if agent == "claude":

@@ -1,4 +1,5 @@
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
+from pathlib import Path
 from enum import Enum
 from typing import Any
 
@@ -26,6 +27,7 @@ class Provider(str, Enum):
     OMNIRUSH = "omnirush"
     COPILOT = "copilot"
     CLAUDE = "claude"
+    FREELLMAPI = "freellmapi"
 
 
 class TaskStatus(str, Enum):
@@ -34,6 +36,7 @@ class TaskStatus(str, Enum):
     RUNNING = "RUNNING"
     VERIFYING = "VERIFYING"
     REVIEWING = "REVIEWING"
+    UNCERTAIN = "UNCERTAIN"
     SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
     BLOCKED = "BLOCKED"
@@ -45,7 +48,7 @@ FOUNDATION_STATES = frozenset({TaskStatus.CREATED, TaskStatus.BLOCKED, TaskStatu
 # Execution states are durable task states that track live or completed
 # execution.  They are persisted in the same EventStore as foundation
 # states — there is no second source of truth.
-EXECUTION_STATES = frozenset({TaskStatus.RUNNING, TaskStatus.SUCCEEDED, TaskStatus.FAILED})
+EXECUTION_STATES = frozenset({TaskStatus.RUNNING, TaskStatus.UNCERTAIN, TaskStatus.SUCCEEDED, TaskStatus.FAILED})
 
 VALID_TASK_STATES = FOUNDATION_STATES | EXECUTION_STATES
 
@@ -65,6 +68,15 @@ class TaskSpec:
     required_tests: tuple[str, ...] | None = None
     timeout_seconds: int | None = None
     correction_round_limit: int | None = None
+    workspace_root_value: str | None = field(default=None, compare=False, repr=False)
+
+    @property
+    def output_contract(self) -> object:
+        return type("_TaskOutputContract", (), {"max_bytes": 4096})()
+
+    @property
+    def workspace_root(self) -> str:
+        return self.workspace_root_value or str(Path.cwd())
 
     def __post_init__(self) -> None:
         task_id(self.task_id)
@@ -85,13 +97,15 @@ class TaskSpec:
             bounded_int(self.correction_round_limit, "correction_round_limit", 0, 100)
 
     def to_dict(self) -> dict[str, Any]:
-        result = {field.name: getattr(self, field.name) for field in fields(self)}
+        result = {field.name: getattr(self, field.name) for field in fields(self)
+                  if field.name != "workspace_root_value"}
         result.update(role=self.role.value, provider=self.provider.value)
         return {key: list(value) if type(value) is tuple else value for key, value in result.items()}
 
     @classmethod
     def from_dict(cls, value: object) -> "TaskSpec":
-        data = dict(exact_keys(value, {field.name for field in fields(cls)}, "TaskSpec"))
+        keys = {field.name for field in fields(cls) if field.name != "workspace_root_value"}
+        data = dict(exact_keys(value, keys, "TaskSpec"))
         try:
             data["role"] = Role(data["role"])
             data["provider"] = Provider(data["provider"])
@@ -121,6 +135,7 @@ class TaskSnapshot:
     # Phase 3A execution state fields
     execution_status: TaskStatus | None = None
     execution_attempt_id: str | None = None
+    recovery_reason: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.spec, TaskSpec):
@@ -139,6 +154,8 @@ class TaskSnapshot:
                 raise ValidationError("foundation blocked tasks must resume CREATED")
         elif self.blocking_reason is not None or self.resume_status is not None:
             raise ValidationError("only BLOCKED tasks carry blocking reason/resume state")
+        if self.status in EXECUTION_STATES and self.execution_status is None:
+            raise ExecutionGuardError("execution states require an execution_status")
         # Guard against foundation-only fields when execution state fields are present
         if self.execution_status is not None or self.execution_attempt_id is not None:
             if any(value is not None for value in (self.plan_revision, self.plan_digest, self.current_attempt)):
@@ -149,12 +166,16 @@ class TaskSnapshot:
             bounded_int(self.correction_rounds_used, "correction_rounds_used", 0, 0)
         # Validate execution state field consistency
         if self.execution_status is not None:
+            if not isinstance(self.execution_status, TaskStatus):
+                raise ValidationError("execution_status must be a TaskStatus or None")
             if self.execution_status not in EXECUTION_STATES:
                 raise ValidationError(f"execution_status must be one of {sorted(s.value for s in EXECUTION_STATES)}, got {self.execution_status.value}")
         if self.execution_attempt_id is not None:
             task_id(self.execution_attempt_id)
             if self.execution_status is None:
                 raise ValidationError("execution_attempt_id requires a non-null execution_status")
+        if self.recovery_reason is not None:
+            text(self.recovery_reason, "recovery reason", 4096)
 
     def to_dict(self) -> dict[str, Any]:
         return {"spec": self.spec.to_dict(), "status": self.status.value, "revision": self.revision,
@@ -164,11 +185,20 @@ class TaskSnapshot:
                 "plan_revision": None, "plan_digest": None, "current_attempt": None,
                 "correction_rounds_used": 0,
                 "execution_status": self.execution_status.value if self.execution_status else None,
-                "execution_attempt_id": self.execution_attempt_id}
+                "execution_attempt_id": self.execution_attempt_id,
+                "recovery_reason": self.recovery_reason}
 
     @classmethod
     def from_dict(cls, value: object) -> "TaskSnapshot":
-        data = dict(exact_keys(value, {field.name for field in fields(cls)}, "TaskSnapshot"))
+        if not isinstance(value, dict):
+            raise ValidationError("TaskSnapshot requires an object")
+        known = {field.name for field in fields(cls)}
+        required = known - {"execution_status", "execution_attempt_id", "recovery_reason"}
+        if not required <= set(value) or not set(value) <= known:
+            raise ValidationError(f"TaskSnapshot requires exactly these fields: {', '.join(sorted(known))}")
+        raw = dict(value)
+        data = {field.name: raw.get(field.name, None) for field in fields(cls)}
+        data["correction_rounds_used"] = raw.get("correction_rounds_used", 0)
         try:
             data["spec"] = TaskSpec.from_dict(data["spec"])
             data["status"] = TaskStatus(data["status"])
@@ -201,6 +231,7 @@ class LedgerEvent:
         if not isinstance(self.event_type, str) or self.event_type not in {
             "TASK_CREATED", "TASK_TRANSITIONED",
             "TASK_EXECUTION_STARTED", "TASK_EXECUTION_COMPLETED",
+            "TASK_EXECUTION_RECOVERED",
         } or self.actor != "controller":
             raise ValidationError("unsupported event type or actor")
         utc_timestamp(self.timestamp)

@@ -233,7 +233,10 @@ async def run_stage(ledger: EventStore, identifier: str, revision: int, config_d
         current = deliveries.get(identifier)
         if current.status is DeliveryStatus.BLOCKED:
             return current
-        return deliveries.invalidate(current, f"Delivery stage validation failed: {exc}")
+        detail = str(exc)
+        if "expected revision" in detail or "reload the task" in detail:
+            detail = "delivery authorization changed; reload the task"
+        return deliveries.invalidate(current, f"Delivery stage validation failed: {detail}")
     except asyncio.CancelledError:
         current = deliveries.get(identifier)
         if current.status is not DeliveryStatus.BLOCKED:

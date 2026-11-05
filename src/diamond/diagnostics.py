@@ -223,6 +223,11 @@ def probe_version(provider: Provider, executable: str, timeout_seconds: float = 
 
 
 def doctor(config: DiamondConfig) -> tuple[ProbeResult, ...]:
-    return tuple(probe_version(provider, config.providers[provider].executable)
-                 if config.providers[provider].enabled else ProbeResult(provider, "disabled", None,
-                     detail="disabled by configuration; no process invoked") for provider in Provider)
+    return tuple(
+        probe_version(provider, config.providers[provider].executable)
+        if config.providers[provider].enabled else ProbeResult(
+            provider, "disabled", None, detail="disabled by configuration; no process invoked"
+        )
+        for provider in Provider
+        if provider is not Provider.FREELLMAPI
+    )

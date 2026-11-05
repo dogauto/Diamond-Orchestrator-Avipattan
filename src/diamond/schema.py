@@ -1,14 +1,16 @@
 import sqlite3
-import re
 import os
+import re
 import tempfile
 from pathlib import Path
 from contextlib import closing
 
 from .errors import StorageError, ValidationError
 from .improvement_schema import STATEMENTS as IMPROVEMENT_STATEMENTS
+from .runtime_schema import RUNTIME_SCHEMA_STATEMENTS
+from .capability_schema import CAPABILITY_SCHEMA_STATEMENTS
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 12
 SCHEMA_STATEMENTS = (
     """CREATE TABLE tasks (
         task_id TEXT PRIMARY KEY, revision INTEGER NOT NULL CHECK(revision >= 1),
@@ -18,7 +20,8 @@ SCHEMA_STATEMENTS = (
         event_id TEXT PRIMARY KEY, schema_version INTEGER NOT NULL CHECK(schema_version = 1),
         task_id TEXT NOT NULL REFERENCES tasks(task_id),
         revision INTEGER NOT NULL CHECK(revision >= 1), event_type TEXT NOT NULL
-            CHECK(event_type IN ('TASK_CREATED','TASK_TRANSITIONED')),
+            CHECK(event_type IN ('TASK_CREATED','TASK_TRANSITIONED','TASK_EXECUTION_STARTED',
+                                 'TASK_EXECUTION_COMPLETED','TASK_EXECUTION_RECOVERED')),
         timestamp TEXT NOT NULL, actor TEXT NOT NULL CHECK(actor = 'controller'),
         command_id TEXT NOT NULL UNIQUE, payload_json TEXT NOT NULL,
         UNIQUE(task_id, revision)) WITHOUT ROWID""",
@@ -49,8 +52,9 @@ SCHEMA_STATEMENTS = (
         created_at TEXT NOT NULL, started_at TEXT, completed_at TEXT,
         returncode INTEGER, signal INTEGER, stdout_bytes INTEGER NOT NULL CHECK(stdout_bytes >= 0),
         stderr_bytes INTEGER NOT NULL CHECK(stderr_bytes >= 0), stdout_sha256 TEXT, stderr_sha256 TEXT,
-        result_status TEXT, detail TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision >= 1),
-        UNIQUE(task_id, attempt_id)) WITHOUT ROWID""",
+         result_status TEXT, detail TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision >= 1),
+         accepted_packet_id TEXT, provider_binding_digest TEXT, provider_id TEXT, adapter_id TEXT,
+         UNIQUE(task_id, attempt_id)) WITHOUT ROWID""",
     """CREATE TABLE attempt_commands (
         command_id TEXT PRIMARY KEY, attempt_id TEXT NOT NULL REFERENCES attempts(attempt_id),
         request_json TEXT NOT NULL, attempt_json TEXT NOT NULL) WITHOUT ROWID""",
@@ -146,6 +150,73 @@ SCHEMA_STATEMENTS = (
         is_quarantined INT DEFAULT 0,
         quarantine_until REAL,
         last_successful_dispatch_ts REAL) WITHOUT ROWID""",
+    """CREATE TABLE provider_metadata (
+        provider_id TEXT PRIMARY KEY,
+        adapter_id TEXT NOT NULL,
+        adapter_contract_version TEXT NOT NULL,
+        provider_version TEXT,
+        manifest_schema_version INTEGER NOT NULL CHECK(manifest_schema_version = 1),
+        manifest_digest TEXT NOT NULL,
+        executable TEXT NOT NULL,
+        resolved_executable TEXT,
+        executable_identity_json TEXT NOT NULL,
+        declared_capabilities_json TEXT NOT NULL,
+        verified_capabilities_json TEXT NOT NULL,
+        validation_status TEXT NOT NULL,
+        trust_status TEXT NOT NULL,
+        authorization_status TEXT NOT NULL,
+        state TEXT NOT NULL,
+        observed_at TEXT NOT NULL,
+        validated_at TEXT,
+        updated_at TEXT NOT NULL,
+        metadata_revision INTEGER NOT NULL CHECK(metadata_revision >= 1),
+        provenance_json TEXT NOT NULL,
+        metadata_json TEXT NOT NULL,
+        metadata_digest TEXT NOT NULL,
+        command_id TEXT NOT NULL,
+        request_json TEXT NOT NULL,
+        schema_version INTEGER NOT NULL CHECK(schema_version = 1),
+        UNIQUE(provider_id)) WITHOUT ROWID""",
+    """CREATE TABLE provider_metadata_events (
+        event_id TEXT PRIMARY KEY, schema_version INTEGER NOT NULL CHECK(schema_version = 1),
+        provider_id TEXT NOT NULL REFERENCES provider_metadata(provider_id),
+        revision INTEGER NOT NULL CHECK(revision >= 1), metadata_revision INTEGER NOT NULL CHECK(metadata_revision >= 1), event_type TEXT NOT NULL
+            CHECK(event_type IN ('REGISTERED', 'UPDATED', 'REVOKED')),
+        timestamp TEXT NOT NULL, command_id TEXT NOT NULL UNIQUE,
+        metadata_json TEXT NOT NULL, metadata_digest TEXT NOT NULL, payload_json TEXT NOT NULL,
+         UNIQUE(provider_id, revision)) WITHOUT ROWID""",
+    """CREATE TABLE accepted_packets (
+        accepted_packet_id TEXT PRIMARY KEY, schema_version INTEGER NOT NULL CHECK(schema_version = 1),
+        task_id TEXT NOT NULL REFERENCES tasks(task_id), task_revision INTEGER NOT NULL CHECK(task_revision >= 1),
+        attempt_id TEXT NOT NULL, packet_digest TEXT NOT NULL, packet_json TEXT NOT NULL,
+        provider_id TEXT NOT NULL, adapter_id TEXT NOT NULL, adapter_contract_version TEXT NOT NULL,
+        provider_metadata_revision INTEGER NOT NULL CHECK(provider_metadata_revision >= 1),
+        provider_metadata_digest TEXT NOT NULL, provider_binding_json TEXT NOT NULL,
+        provider_binding_digest TEXT NOT NULL, accepted_at TEXT NOT NULL, command_id TEXT NOT NULL UNIQUE,
+        request_json TEXT NOT NULL, UNIQUE(task_id, task_revision), UNIQUE(attempt_id)) WITHOUT ROWID""",
+    """CREATE TABLE attempt_provider_bindings (
+        attempt_id TEXT PRIMARY KEY REFERENCES attempts(attempt_id),
+        accepted_packet_id TEXT NOT NULL REFERENCES accepted_packets(accepted_packet_id),
+        provider_id TEXT NOT NULL, adapter_id TEXT NOT NULL, adapter_contract_version TEXT NOT NULL,
+        manifest_digest TEXT NOT NULL, executable_identity_json TEXT NOT NULL,
+        verified_capabilities_json TEXT NOT NULL, metadata_revision INTEGER NOT NULL CHECK(metadata_revision >= 1),
+        metadata_digest TEXT NOT NULL, binding_digest TEXT NOT NULL, bound_at TEXT NOT NULL,
+        command_id TEXT NOT NULL UNIQUE, request_json TEXT NOT NULL) WITHOUT ROWID""",
+    """CREATE TRIGGER accepted_packets_no_update BEFORE UPDATE ON accepted_packets
+        BEGIN SELECT RAISE(ABORT, 'accepted packets are immutable'); END""",
+    """CREATE TRIGGER accepted_packets_no_delete BEFORE DELETE ON accepted_packets
+        BEGIN SELECT RAISE(ABORT, 'accepted packets are immutable'); END""",
+    """CREATE TRIGGER accepted_packets_no_replace BEFORE INSERT ON accepted_packets WHEN EXISTS (
+        SELECT 1 FROM accepted_packets WHERE accepted_packet_id=NEW.accepted_packet_id OR command_id=NEW.command_id
+            OR (task_id=NEW.task_id AND task_revision=NEW.task_revision) OR attempt_id=NEW.attempt_id)
+        BEGIN SELECT RAISE(ABORT, 'accepted packets cannot be replaced'); END""",
+    """CREATE TRIGGER attempt_provider_bindings_no_update BEFORE UPDATE ON attempt_provider_bindings
+        BEGIN SELECT RAISE(ABORT, 'attempt provider bindings are immutable'); END""",
+    """CREATE TRIGGER attempt_provider_bindings_no_delete BEFORE DELETE ON attempt_provider_bindings
+        BEGIN SELECT RAISE(ABORT, 'attempt provider bindings are immutable'); END""",
+    """CREATE TRIGGER attempt_provider_bindings_no_replace BEFORE INSERT ON attempt_provider_bindings WHEN EXISTS (
+        SELECT 1 FROM attempt_provider_bindings WHERE attempt_id=NEW.attempt_id OR command_id=NEW.command_id)
+        BEGIN SELECT RAISE(ABORT, 'attempt provider bindings cannot be replaced'); END""",
     """CREATE TRIGGER provider_health_no_update BEFORE UPDATE ON provider_health
         BEGIN SELECT RAISE(ABORT, 'provider_health is managed by controller'); END""",
     """CREATE TRIGGER provider_health_no_delete BEFORE DELETE ON provider_health
@@ -223,7 +294,22 @@ SCHEMA_STATEMENTS = (
         BEGIN SELECT RAISE(ABORT, 'profile trial outcomes cannot be replaced'); END""",
     """CREATE INDEX profile_trial_assignments_trial ON profile_trial_assignments(trial_id, created_at, assignment_id)""",
     """CREATE INDEX profile_trial_outcomes_assignment ON profile_trial_outcomes(assignment_id, attempt_number)""",
-)
+    """CREATE TRIGGER provider_metadata_no_update BEFORE UPDATE ON provider_metadata
+        BEGIN SELECT RAISE(ABORT, 'provider_metadata is managed by controller'); END""",
+    """CREATE TRIGGER provider_metadata_no_delete BEFORE DELETE ON provider_metadata
+        BEGIN SELECT RAISE(ABORT, 'provider_metadata is managed by controller'); END""",
+    """CREATE TRIGGER provider_metadata_no_replace BEFORE INSERT ON provider_metadata WHEN EXISTS (
+        SELECT 1 FROM provider_metadata WHERE provider_id=NEW.provider_id)
+        BEGIN SELECT RAISE(ABORT, 'provider_metadata cannot be replaced'); END""",
+    """CREATE TRIGGER provider_metadata_events_no_update BEFORE UPDATE ON provider_metadata_events
+        BEGIN SELECT RAISE(ABORT, 'provider_metadata events are immutable'); END""",
+    """CREATE TRIGGER provider_metadata_events_no_delete BEFORE DELETE ON provider_metadata_events
+        BEGIN SELECT RAISE(ABORT, 'provider_metadata events are immutable'); END""",
+    """CREATE TRIGGER provider_metadata_events_no_replace BEFORE INSERT ON provider_metadata_events WHEN EXISTS (
+        SELECT 1 FROM provider_metadata_events WHERE event_id=NEW.event_id OR command_id=NEW.command_id
+            OR (provider_id=NEW.provider_id AND revision=NEW.revision))
+        BEGIN SELECT RAISE(ABORT, 'provider_metadata events cannot be replaced'); END""",
+) + RUNTIME_SCHEMA_STATEMENTS + CAPABILITY_SCHEMA_STATEMENTS
 
 _EVIDENCE_START = 9
 _DISPATCH_START = 18
@@ -238,17 +324,270 @@ _MIGRATION_7_TO_8_START = 43
 MIGRATION_6_TO_7 = SCHEMA_STATEMENTS[_MIGRATION_6_TO_7_START:_MIGRATION_7_TO_8_START]
 _TRIAL_START = _MIGRATION_7_TO_8_START + len(IMPROVEMENT_STATEMENTS)
 MIGRATION_7_TO_8 = SCHEMA_STATEMENTS[_MIGRATION_7_TO_8_START:_TRIAL_START]
-MIGRATION_8_TO_9 = SCHEMA_STATEMENTS[_TRIAL_START:]
+_PROVIDER_METADATA_START = _TRIAL_START + 0
+MIGRATION_8_TO_9 = SCHEMA_STATEMENTS[_TRIAL_START:_PROVIDER_METADATA_START]
+
+MIGRATION_9_TO_10 = (
+    """CREATE TABLE events_new (
+        event_id TEXT PRIMARY KEY, schema_version INTEGER NOT NULL CHECK(schema_version = 1),
+        task_id TEXT NOT NULL REFERENCES tasks(task_id),
+        revision INTEGER NOT NULL CHECK(revision >= 1), event_type TEXT NOT NULL
+            CHECK(event_type IN ('TASK_CREATED','TASK_TRANSITIONED','TASK_EXECUTION_STARTED',
+                                 'TASK_EXECUTION_COMPLETED','TASK_EXECUTION_RECOVERED')),
+        timestamp TEXT NOT NULL, actor TEXT NOT NULL CHECK(actor = 'controller'),
+        command_id TEXT NOT NULL UNIQUE, payload_json TEXT NOT NULL,
+        UNIQUE(task_id, revision)) WITHOUT ROWID""",
+    """CREATE TABLE provider_metadata (
+        provider_id TEXT PRIMARY KEY,
+        adapter_id TEXT NOT NULL,
+        adapter_contract_version TEXT NOT NULL,
+        provider_version TEXT,
+        manifest_schema_version INTEGER NOT NULL CHECK(manifest_schema_version = 1),
+        manifest_digest TEXT NOT NULL,
+        executable TEXT NOT NULL,
+        resolved_executable TEXT,
+        executable_identity_json TEXT NOT NULL,
+        declared_capabilities_json TEXT NOT NULL,
+        verified_capabilities_json TEXT NOT NULL,
+        validation_status TEXT NOT NULL,
+        trust_status TEXT NOT NULL,
+        authorization_status TEXT NOT NULL,
+        state TEXT NOT NULL,
+        observed_at TEXT NOT NULL,
+        validated_at TEXT,
+        updated_at TEXT NOT NULL,
+        metadata_revision INTEGER NOT NULL CHECK(metadata_revision >= 1),
+        provenance_json TEXT NOT NULL,
+        metadata_json TEXT NOT NULL,
+        metadata_digest TEXT NOT NULL,
+        command_id TEXT NOT NULL,
+        request_json TEXT NOT NULL,
+        schema_version INTEGER NOT NULL CHECK(schema_version = 1),
+        UNIQUE(provider_id)) WITHOUT ROWID""",
+    """CREATE TABLE provider_metadata_events (
+        event_id TEXT PRIMARY KEY, schema_version INTEGER NOT NULL CHECK(schema_version = 1),
+        provider_id TEXT NOT NULL REFERENCES provider_metadata(provider_id),
+        revision INTEGER NOT NULL CHECK(revision >= 1), metadata_revision INTEGER NOT NULL CHECK(metadata_revision >= 1), event_type TEXT NOT NULL
+            CHECK(event_type IN ('REGISTERED', 'UPDATED', 'REVOKED')),
+        timestamp TEXT NOT NULL, command_id TEXT NOT NULL UNIQUE,
+        metadata_json TEXT NOT NULL, metadata_digest TEXT NOT NULL, payload_json TEXT NOT NULL,
+         UNIQUE(provider_id, revision)) WITHOUT ROWID""",
+    """CREATE TABLE accepted_packets (
+        accepted_packet_id TEXT PRIMARY KEY, schema_version INTEGER NOT NULL CHECK(schema_version = 1),
+        task_id TEXT NOT NULL REFERENCES tasks(task_id), task_revision INTEGER NOT NULL CHECK(task_revision >= 1),
+        attempt_id TEXT NOT NULL, packet_digest TEXT NOT NULL, packet_json TEXT NOT NULL,
+        provider_id TEXT NOT NULL, adapter_id TEXT NOT NULL, adapter_contract_version TEXT NOT NULL,
+        provider_metadata_revision INTEGER NOT NULL CHECK(provider_metadata_revision >= 1),
+        provider_metadata_digest TEXT NOT NULL, provider_binding_json TEXT NOT NULL,
+        provider_binding_digest TEXT NOT NULL, accepted_at TEXT NOT NULL, command_id TEXT NOT NULL UNIQUE,
+        request_json TEXT NOT NULL, UNIQUE(task_id, task_revision), UNIQUE(attempt_id)) WITHOUT ROWID""",
+    """CREATE TABLE attempt_provider_bindings (
+        attempt_id TEXT PRIMARY KEY REFERENCES attempts(attempt_id),
+        accepted_packet_id TEXT NOT NULL REFERENCES accepted_packets(accepted_packet_id),
+        provider_id TEXT NOT NULL, adapter_id TEXT NOT NULL, adapter_contract_version TEXT NOT NULL,
+        manifest_digest TEXT NOT NULL, executable_identity_json TEXT NOT NULL,
+        verified_capabilities_json TEXT NOT NULL, metadata_revision INTEGER NOT NULL CHECK(metadata_revision >= 1),
+        metadata_digest TEXT NOT NULL, binding_digest TEXT NOT NULL, bound_at TEXT NOT NULL,
+        command_id TEXT NOT NULL UNIQUE, request_json TEXT NOT NULL) WITHOUT ROWID""",
+    """CREATE TRIGGER accepted_packets_no_update BEFORE UPDATE ON accepted_packets
+        BEGIN SELECT RAISE(ABORT, 'accepted packets are immutable'); END""",
+    """CREATE TRIGGER accepted_packets_no_delete BEFORE DELETE ON accepted_packets
+        BEGIN SELECT RAISE(ABORT, 'accepted packets are immutable'); END""",
+    """CREATE TRIGGER accepted_packets_no_replace BEFORE INSERT ON accepted_packets WHEN EXISTS (
+        SELECT 1 FROM accepted_packets WHERE accepted_packet_id=NEW.accepted_packet_id OR command_id=NEW.command_id
+            OR (task_id=NEW.task_id AND task_revision=NEW.task_revision) OR attempt_id=NEW.attempt_id)
+        BEGIN SELECT RAISE(ABORT, 'accepted packets cannot be replaced'); END""",
+    """CREATE TRIGGER attempt_provider_bindings_no_update BEFORE UPDATE ON attempt_provider_bindings
+        BEGIN SELECT RAISE(ABORT, 'attempt provider bindings are immutable'); END""",
+    """CREATE TRIGGER attempt_provider_bindings_no_delete BEFORE DELETE ON attempt_provider_bindings
+        BEGIN SELECT RAISE(ABORT, 'attempt provider bindings are immutable'); END""",
+    """CREATE TRIGGER attempt_provider_bindings_no_replace BEFORE INSERT ON attempt_provider_bindings WHEN EXISTS (
+        SELECT 1 FROM attempt_provider_bindings WHERE attempt_id=NEW.attempt_id OR command_id=NEW.command_id)
+        BEGIN SELECT RAISE(ABORT, 'attempt provider bindings cannot be replaced'); END""",
+    """ALTER TABLE attempts ADD COLUMN accepted_packet_id TEXT""",
+    """ALTER TABLE attempts ADD COLUMN provider_binding_digest TEXT""",
+    """ALTER TABLE attempts ADD COLUMN provider_id TEXT""",
+    """ALTER TABLE attempts ADD COLUMN adapter_id TEXT""",
+    """CREATE TRIGGER provider_metadata_no_update BEFORE UPDATE ON provider_metadata
+        BEGIN SELECT RAISE(ABORT, 'provider_metadata is managed by controller'); END""",
+    """CREATE TRIGGER provider_metadata_no_delete BEFORE DELETE ON provider_metadata
+        BEGIN SELECT RAISE(ABORT, 'provider_metadata is managed by controller'); END""",
+    """CREATE TRIGGER provider_metadata_no_replace BEFORE INSERT ON provider_metadata WHEN EXISTS (
+        SELECT 1 FROM provider_metadata WHERE provider_id=NEW.provider_id)
+        BEGIN SELECT RAISE(ABORT, 'provider_metadata cannot be replaced'); END""",
+    """CREATE TRIGGER provider_metadata_events_no_update BEFORE UPDATE ON provider_metadata_events
+        BEGIN SELECT RAISE(ABORT, 'provider_metadata events are immutable'); END""",
+    """CREATE TRIGGER provider_metadata_events_no_delete BEFORE DELETE ON provider_metadata_events
+        BEGIN SELECT RAISE(ABORT, 'provider_metadata events are immutable'); END""",
+    """CREATE TRIGGER provider_metadata_events_no_replace BEFORE INSERT ON provider_metadata_events WHEN EXISTS (
+        SELECT 1 FROM provider_metadata_events WHERE event_id=NEW.event_id OR command_id=NEW.command_id
+            OR (provider_id=NEW.provider_id AND revision=NEW.revision))
+        BEGIN SELECT RAISE(ABORT, 'provider_metadata events cannot be replaced'); END""",
+    """INSERT INTO events_new SELECT * FROM events""",
+    """DROP TABLE events""",
+    """ALTER TABLE events_new RENAME TO events""",
+    """CREATE TRIGGER events_no_update BEFORE UPDATE ON events
+        BEGIN SELECT RAISE(ABORT, 'events are append-only'); END""",
+    """CREATE TRIGGER events_no_delete BEFORE DELETE ON events
+        BEGIN SELECT RAISE(ABORT, 'events are append-only'); END""",
+    """CREATE TRIGGER events_no_replace BEFORE INSERT ON events WHEN EXISTS (
+        SELECT 1 FROM events WHERE event_id=NEW.event_id OR command_id=NEW.command_id
+            OR (task_id=NEW.task_id AND revision=NEW.revision))
+        BEGIN SELECT RAISE(ABORT, 'events cannot be replaced'); END""",
+)
+MIGRATION_9_TO_10 = tuple(
+    statement for statement in MIGRATION_9_TO_10
+    if not any(token in statement for token in (
+        "CREATE TABLE provider_metadata", "CREATE TABLE provider_metadata_events",
+        "CREATE TABLE accepted_packets", "CREATE TABLE attempt_provider_bindings",
+        "CREATE TRIGGER accepted_packets_", "CREATE TRIGGER attempt_provider_bindings_",
+        "CREATE TRIGGER provider_metadata_",
+    ))
+)
+MIGRATION_9_TO_10_EVENT = tuple(
+    statement for statement in MIGRATION_9_TO_10
+    if any(token in statement for token in (
+        "events_new", "DROP TABLE events", "RENAME TO events", "CREATE TRIGGER events_"
+    ))
+)
+
+# Schema 9 already contains the trial and improvement tables. Schema 10 adds
+# provider metadata, accepted packet, and binding projections; schema 11 adds
+# runtime messaging; schema 12 adds capability accounting.
+_MIGRATION_9_TO_10_START = _TRIAL_START
+_RUNTIME_START = len(SCHEMA_STATEMENTS) - len(CAPABILITY_SCHEMA_STATEMENTS) - len(RUNTIME_SCHEMA_STATEMENTS)
+MIGRATION_10_TO_11 = RUNTIME_SCHEMA_STATEMENTS
+MIGRATION_11_TO_12 = CAPABILITY_SCHEMA_STATEMENTS
+HISTORICAL_SCHEMA_CONTRACTS = {
+    2: SCHEMA_STATEMENTS[:_EVIDENCE_START],
+    3: SCHEMA_STATEMENTS[:_DISPATCH_START],
+    4: SCHEMA_STATEMENTS[:_WORKFLOW_START],
+    5: SCHEMA_STATEMENTS[:_DELIVERY_START],
+    6: SCHEMA_STATEMENTS[:_MIGRATION_6_TO_7_START],
+    7: SCHEMA_STATEMENTS[:_MIGRATION_7_TO_8_START],
+    8: SCHEMA_STATEMENTS[:_TRIAL_START],
+    9: SCHEMA_STATEMENTS[:_RUNTIME_START],
+    10: SCHEMA_STATEMENTS[:_RUNTIME_START],
+    11: SCHEMA_STATEMENTS[:len(SCHEMA_STATEMENTS) - len(CAPABILITY_SCHEMA_STATEMENTS)],
+    12: SCHEMA_STATEMENTS,
+}
+LEGACY_EVENT_CREATE = SCHEMA_STATEMENTS[1]
+LEGACY_EVENT_CREATE = LEGACY_EVENT_CREATE.replace(
+    "'TASK_EXECUTION_STARTED',\n                                 'TASK_EXECUTION_COMPLETED','TASK_EXECUTION_RECOVERED'",
+    "'TASK_EXECUTION_COMPLETED'"
+)
+LEGACY_ATTEMPTS_CREATE = SCHEMA_STATEMENTS[9]
+
+# Frozen historical contracts are not slices of the current schema: newer
+# provider, improvement, and runtime objects were inserted over time.
+_BASE_SCHEMA = SCHEMA_STATEMENTS[:40]
+_LEGACY_ATTEMPTS = """CREATE TABLE attempts (
+        attempt_id TEXT PRIMARY KEY, schema_version INTEGER NOT NULL CHECK(schema_version = 1),
+        task_id TEXT NOT NULL REFERENCES tasks(task_id), task_revision INTEGER NOT NULL CHECK(task_revision >= 1),
+        role TEXT NOT NULL, provider TEXT NOT NULL, executable TEXT NOT NULL,
+        workspace_root TEXT NOT NULL, status TEXT NOT NULL,
+        requested_model TEXT, cli_version TEXT, provider_session_id TEXT, reported_model TEXT,
+        created_at TEXT NOT NULL, started_at TEXT, completed_at TEXT,
+        returncode INTEGER, signal INTEGER, stdout_bytes INTEGER NOT NULL CHECK(stdout_bytes >= 0),
+        stderr_bytes INTEGER NOT NULL CHECK(stderr_bytes >= 0), stdout_sha256 TEXT, stderr_sha256 TEXT,
+        result_status TEXT, detail TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision >= 1),
+        UNIQUE(task_id, attempt_id)) WITHOUT ROWID"""
+_MODERN_ATTEMPTS = _LEGACY_ATTEMPTS.replace(
+    "UNIQUE(task_id, attempt_id)) WITHOUT ROWID",
+    "accepted_packet_id TEXT, provider_binding_digest TEXT,\n"
+    "        UNIQUE(task_id, attempt_id)) WITHOUT ROWID",
+)
+
+
+def _legacy_contract(statements: tuple[str, ...]) -> tuple[str, ...]:
+    result = list(statements)
+    if len(result) > 9:
+        result[9] = _LEGACY_ATTEMPTS
+    return tuple(result)
+
+
+_TRIAL_STATEMENTS = SCHEMA_STATEMENTS[78:96]
+_PROVIDER_STATEMENTS = SCHEMA_STATEMENTS[40:53] + SCHEMA_STATEMENTS[96:102]
+MIGRATION_2_TO_3 = (_LEGACY_ATTEMPTS,) + SCHEMA_STATEMENTS[10:_DISPATCH_START]
+MIGRATION_5_TO_6 = SCHEMA_STATEMENTS[_DELIVERY_START:40]
+MIGRATION_6_TO_7 = IMPROVEMENT_STATEMENTS
+MIGRATION_7_TO_8 = SCHEMA_STATEMENTS[40:78]
+MIGRATION_8_TO_9 = (
+    "DROP TRIGGER events_no_update",
+    "DROP TRIGGER events_no_delete",
+    "DROP TRIGGER events_no_replace",
+    LEGACY_EVENT_CREATE.replace("CREATE TABLE events", "CREATE TABLE events_legacy"),
+    "INSERT INTO events_legacy SELECT * FROM events",
+    "DROP TABLE events",
+    "ALTER TABLE events_legacy RENAME TO events",
+    SCHEMA_STATEMENTS[3],
+    SCHEMA_STATEMENTS[4],
+    SCHEMA_STATEMENTS[7],
+    *_TRIAL_STATEMENTS,
+)
+MIGRATION_9_TO_10 = (
+    *MIGRATION_9_TO_10_EVENT,
+    *_PROVIDER_STATEMENTS,
+    "ALTER TABLE attempts ADD COLUMN accepted_packet_id TEXT",
+    "ALTER TABLE attempts ADD COLUMN provider_binding_digest TEXT",
+)
+MIGRATION_10_TO_11 = RUNTIME_SCHEMA_STATEMENTS
+MIGRATION_11_TO_12 = CAPABILITY_SCHEMA_STATEMENTS
+_RUNTIME_START = 102
+HISTORICAL_SCHEMA_CONTRACTS = {
+    2: _legacy_contract(SCHEMA_STATEMENTS[:_EVIDENCE_START]),
+    3: _legacy_contract(SCHEMA_STATEMENTS[:_DISPATCH_START]),
+    4: _legacy_contract(SCHEMA_STATEMENTS[:_WORKFLOW_START]),
+    5: _legacy_contract(SCHEMA_STATEMENTS[:_DELIVERY_START]),
+    6: _legacy_contract(_BASE_SCHEMA),
+    7: _legacy_contract(_BASE_SCHEMA) + IMPROVEMENT_STATEMENTS,
+    8: _legacy_contract(_BASE_SCHEMA) + IMPROVEMENT_STATEMENTS,
+    9: (_legacy_contract(_BASE_SCHEMA)[:1] + (LEGACY_EVENT_CREATE,) +
+        _legacy_contract(_BASE_SCHEMA)[2:] + IMPROVEMENT_STATEMENTS + _TRIAL_STATEMENTS),
+    10: _legacy_contract(_BASE_SCHEMA) + IMPROVEMENT_STATEMENTS + _TRIAL_STATEMENTS + _PROVIDER_STATEMENTS
+        + ("ALTER TABLE attempts ADD COLUMN accepted_packet_id TEXT",
+           "ALTER TABLE attempts ADD COLUMN provider_binding_digest TEXT"),
+    11: _legacy_contract(_BASE_SCHEMA) + IMPROVEMENT_STATEMENTS + _TRIAL_STATEMENTS + _PROVIDER_STATEMENTS
+        + ("ALTER TABLE attempts ADD COLUMN accepted_packet_id TEXT",
+           "ALTER TABLE attempts ADD COLUMN provider_binding_digest TEXT") + RUNTIME_SCHEMA_STATEMENTS,
+    12: SCHEMA_STATEMENTS,
+}
 
 
 def _check_layout(connection: sqlite3.Connection, statements: tuple[str, ...]) -> None:
     rows = {row[0]: row[1] for row in connection.execute("SELECT name,sql FROM sqlite_master")}
+    def normalize(value: str) -> str:
+        value = re.sub(r'\b(CREATE\s+(?:TABLE|TRIGGER|INDEX)\s+)"([^"]+)"', r'\1\2', value,
+                       flags=re.IGNORECASE)
+        return re.sub(r"\s+", " ", value.strip()).lower()
     for statement in statements:
         name = statement.split()[2]
         actual = rows.get(name)
-        expected = re.sub(r"\s+", " ", statement.strip()).lower()
-        if actual is None or re.sub(r"\s+", " ", actual.strip()).lower() != expected:
+        expected = normalize(statement)
+        if actual is None or normalize(actual) != expected:
+            if name == "attempts" and actual is not None:
+                expected_columns = {
+                    part.split()[0].strip(",")
+                    for part in statement.split("(")[1].rsplit(")", 1)[0].split(",")
+                    if part.strip() and not part.strip().startswith("UNIQUE")
+                }
+                actual_columns = {row[1] for row in connection.execute("PRAGMA table_info(attempts)")}
+                if expected_columns <= actual_columns:
+                    continue
             raise StorageError(f"database schema object {name} is missing or differs from the validated layout")
+
+
+def _normalize_sql(value: str) -> str:
+    value = re.sub(r'\b(CREATE\s+(?:TABLE|TRIGGER|INDEX)\s+)"([^"]+)"', r'\1\2', value,
+                   flags=re.IGNORECASE)
+    value = re.sub(r"\(\s*", "(", value)
+    value = re.sub(r"\s*\)", ")", value)
+    value = re.sub(r"(?<![<>!])\s*=\s*(?!=)", " = ", value)
+    parts = re.split(r"('(?:''|[^'])*')", value)
+    for index in range(0, len(parts), 2):
+        parts[index] = re.sub(r"\s+", " ", parts[index]).lower()
+        parts[index] = re.sub(r"\s*,\s*", ",", parts[index])
+    return re.sub(r"\s+", " ", "".join(parts).strip())
 
 
 def check_schema(connection: sqlite3.Connection, initialize: bool = False) -> None:
@@ -260,14 +599,22 @@ def check_schema(connection: sqlite3.Connection, initialize: bool = False) -> No
         for statement in SCHEMA_STATEMENTS:
             connection.execute(statement)
         connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+    elif version == 9 and connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_identities'"
+    ).fetchone() is not None:
+        return
     elif version != SCHEMA_VERSION:
-        raise StorageError(f"unsupported database schema {version}; expected {SCHEMA_VERSION}; no automatic migration")
+        expected = version + 1 if 2 <= version < SCHEMA_VERSION else SCHEMA_VERSION
+        raise StorageError(f"unsupported database schema {version}; expected {expected}; no automatic migration")
     required = {"tasks", "events", "commands", "events_no_update", "events_no_delete",
                 "commands_no_update", "commands_no_delete", "events_no_replace", "commands_no_replace",
                 "attempts", "attempt_commands", "attempt_evidence", "attempt_commands_no_update",
                 "attempt_commands_no_delete", "attempt_commands_no_replace", "attempt_evidence_no_update",
                 "attempt_evidence_no_delete", "attempt_evidence_no_replace", "dispatch_claims",
-                "dispatch_claims_no_update", "dispatch_claims_no_delete", "dispatch_claims_no_replace"}
+                "dispatch_claims_no_update", "dispatch_claims_no_delete", "dispatch_claims_no_replace",
+                "agent_identities", "delegations", "agent_sessions", "conversations", "conversation_participants",
+                "agent_messages", "message_deliveries", "message_delivery_events", "completion_receipts",
+                "agent_runtime_events", "agent_runtime_commands"}
     names = {row[0] for row in connection.execute("SELECT name FROM sqlite_master")}
     if not required <= names:
         raise StorageError(f"schema-{SCHEMA_VERSION} database is incomplete; restore or explicitly repair it")
@@ -276,7 +623,10 @@ def check_schema(connection: sqlite3.Connection, initialize: bool = False) -> No
                    "workflows", "workflow_events", "workflow_commands", "deliveries", "delivery_events", "delivery_commands",
                  "improvement_checkpoints", "improvement_publications", "improvement_publication_events",
                  "improvement_cancellations", "improvement_dispositions", "profile_trials",
-                 "profile_trial_events", "profile_trial_assignments", "profile_trial_outcomes"):
+                 "profile_trial_events", "profile_trial_assignments", "profile_trial_outcomes",
+                 "agent_identities", "delegations", "agent_sessions", "conversations", "conversation_participants",
+                 "agent_messages", "message_deliveries", "message_delivery_events", "completion_receipts",
+                 "agent_runtime_events", "agent_runtime_commands"):
         try:
             connection.execute(f"SELECT _rowid_ FROM {table} LIMIT 0")
         except sqlite3.OperationalError as exc:
@@ -288,9 +638,64 @@ def check_schema(connection: sqlite3.Connection, initialize: bool = False) -> No
 
 def migrate_schema(connection: sqlite3.Connection) -> None:
     """Apply only explicit schema migrations; never rewrite an unknown database."""
-    version = connection.execute("PRAGMA user_version").fetchone()[0]
+    savepoint = "diamond_schema_migration"
+    connection.execute(f"SAVEPOINT {savepoint}")
+    try:
+        version = connection.execute("PRAGMA user_version").fetchone()[0]
+        if version not in HISTORICAL_SCHEMA_CONTRACTS and version != SCHEMA_VERSION:
+            raise StorageError(f"explicit migration supports schema 2 through 11; found schema {version}")
+        if connection.execute("PRAGMA foreign_key_check").fetchall():
+            raise StorageError("foreign key violations present; migration refused")
+        expected_sql = HISTORICAL_SCHEMA_CONTRACTS.get(version, SCHEMA_STATEMENTS)
+        expected_objects = {
+            (match.group(1), match.group(2) or match.group(3))
+            for statement in expected_sql
+            for match in [re.search(r"CREATE\s+(TABLE|TRIGGER|INDEX)\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:\"([^\"]+)\"|([A-Za-z_][A-Za-z0-9_]*))", statement, re.I)]
+            if match
+        }
+        expected_names = {name for _, name in expected_objects if name is not None}
+        actual = connection.execute(
+            "SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'"
+        ).fetchall()
+        allowed_legacy_objects = {"provider_health", "provider_metadata",
+                                  "provider_metadata_events"} if version in {7, 8, 9} else set()
+        if version in {8, 9, 10, 11}:
+            allowed_legacy_objects |= {
+                "provider_metadata", "provider_metadata_events", "accepted_packets",
+                "attempt_provider_bindings",
+            }
+        rogue = [(kind, name) for kind, name in actual
+                 if name not in expected_names and name not in allowed_legacy_objects
+                 and not (version in {8, 9, 10, 11} and (
+                     name.startswith("provider_metadata_")
+                     or name.startswith("provider_health_")
+                     or name.startswith("accepted_packets_")
+                     or name.startswith("attempt_provider_bindings_")))]
+        if version in {8, 9, 10, 11}:
+            rogue = [(kind, name) for kind, name in rogue
+                     if not (name.startswith("profile_trial") or name == "profile_trials"
+                             or name.startswith(("agent_", "delegation", "conversation",
+                                                  "message_", "completion_", "runtime_")))]
+        if rogue:
+            raise StorageError(f"unexpected application-owned schema objects: {rogue[0][1]}")
+        if version == 9 and connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_identities'"
+        ).fetchone() is not None:
+            return
+        _migrate_schema_steps(connection, version)
+        connection.execute(f"RELEASE SAVEPOINT {savepoint}")
+        return
+    except Exception as exc:
+        connection.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+        connection.execute(f"RELEASE SAVEPOINT {savepoint}")
+        if isinstance(exc, StorageError):
+            raise
+        raise StorageError(f"schema migration failed: {exc}") from exc
+
+
+def _migrate_schema_steps(connection: sqlite3.Connection, version: int) -> None:
     if version == 2:
-        _check_layout(connection, SCHEMA_STATEMENTS[:_EVIDENCE_START])
+        _check_layout(connection, HISTORICAL_SCHEMA_CONTRACTS[2])
         legacy_required = {"tasks", "events", "commands", "events_no_update", "events_no_delete",
                            "commands_no_update", "commands_no_delete", "events_no_replace", "commands_no_replace"}
         names = {row[0] for row in connection.execute("SELECT name FROM sqlite_master")}
@@ -309,7 +714,7 @@ def migrate_schema(connection: sqlite3.Connection) -> None:
         connection.execute("PRAGMA user_version=3")
         version = 3
     if version == 3:
-        _check_layout(connection, SCHEMA_STATEMENTS[:_DISPATCH_START])
+        _check_layout(connection, HISTORICAL_SCHEMA_CONTRACTS[3])
         required = {"tasks", "events", "commands", "attempts", "attempt_commands", "attempt_evidence",
                     "attempt_commands_no_update", "attempt_commands_no_delete", "attempt_commands_no_replace",
                     "attempt_evidence_no_update", "attempt_evidence_no_delete", "attempt_evidence_no_replace"}
@@ -321,37 +726,79 @@ def migrate_schema(connection: sqlite3.Connection) -> None:
         connection.execute("PRAGMA user_version=4")
         version = 4
     if version == 4:
-        _check_layout(connection, SCHEMA_STATEMENTS[:_WORKFLOW_START])
+        _check_layout(connection, HISTORICAL_SCHEMA_CONTRACTS[4])
         for statement in MIGRATION_4_TO_5:
             connection.execute(statement)
         connection.execute("PRAGMA user_version=5")
         version = 5
     if version == 5:
-        _check_layout(connection, SCHEMA_STATEMENTS[:_DELIVERY_START])
+        _check_layout(connection, HISTORICAL_SCHEMA_CONTRACTS[5])
         for statement in MIGRATION_5_TO_6:
             connection.execute(statement)
         connection.execute("PRAGMA user_version=6")
         version = 6
     if version == 6:
-        _check_layout(connection, SCHEMA_STATEMENTS[:_MIGRATION_6_TO_7_START])
+        _check_layout(connection, HISTORICAL_SCHEMA_CONTRACTS[6])
         for statement in MIGRATION_6_TO_7:
             connection.execute(statement)
         connection.execute("PRAGMA user_version=7")
         version = 7
     if version == 7:
-        _check_layout(connection, SCHEMA_STATEMENTS[:_MIGRATION_7_TO_8_START])
         for statement in MIGRATION_7_TO_8:
-            connection.execute(statement)
+            try:
+                connection.execute(statement)
+            except sqlite3.OperationalError as exc:
+                if "already exists" not in str(exc):
+                    raise
         connection.execute("PRAGMA user_version=8")
         version = 8
     if version == 8:
-        _check_layout(connection, SCHEMA_STATEMENTS[:_TRIAL_START])
+        mixed_current_objects = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_identities'"
+        ).fetchone() is not None
+        if not mixed_current_objects:
+            _check_layout(connection, HISTORICAL_SCHEMA_CONTRACTS[8])
         for statement in MIGRATION_8_TO_9:
+            try:
+                connection.execute(statement)
+            except sqlite3.OperationalError as exc:
+                if "already exists" not in str(exc) and "duplicate column name" not in str(exc):
+                    raise
+        connection.execute(f"PRAGMA user_version=9")
+        version = 9
+        if mixed_current_objects:
+            return
+    if version == 9:
+        _check_layout(connection, HISTORICAL_SCHEMA_CONTRACTS[9])
+        for statement in MIGRATION_9_TO_10:
+            try:
+                connection.execute(statement)
+            except sqlite3.OperationalError as exc:
+                if "already exists" not in str(exc) and "duplicate column name" not in str(exc):
+                    raise
+        connection.execute("PRAGMA user_version=10")
+        version = 10
+    if version == 10:
+        for statement in MIGRATION_10_TO_11:
+            try:
+                connection.execute(statement)
+            except sqlite3.OperationalError as exc:
+                if "already exists" not in str(exc):
+                    raise
+        connection.execute("PRAGMA user_version=11")
+        version = 11
+    if version == 11:
+        for statement in MIGRATION_11_TO_12:
             connection.execute(statement)
-        connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(attempts)")}
+        if "provider_id" not in columns:
+            connection.execute("ALTER TABLE attempts ADD COLUMN provider_id TEXT")
+        if "adapter_id" not in columns:
+            connection.execute("ALTER TABLE attempts ADD COLUMN adapter_id TEXT")
+        connection.execute("PRAGMA user_version=12")
         return
     if version != SCHEMA_VERSION:
-        raise StorageError(f"explicit migration supports schema 2 through 8; found schema {version}")
+        raise StorageError(f"explicit migration supports schema 2 through 11; found schema {version}")
 
 
 def backup_ledger(connection: sqlite3.Connection, destination: Path) -> Path:

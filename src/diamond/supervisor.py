@@ -12,7 +12,7 @@ from typing import Callable
 from .adapters import Invocation, validate_working_directory
 from .errors import ValidationError
 from .processes import ProcessIdentity, identify
-from .sandbox import prepare_read_only
+from .sandbox import cleanup_runtime, prepare_read_only
 from .validation import bounded_int
 
 
@@ -174,7 +174,10 @@ async def run(invocation: Invocation, cwd: Path, timeout_seconds: float = 900,
             start_new_session=os.name == "posix")
     except (OSError, ValueError) as exc:
         if sandbox_runtime is not None:
-            shutil.rmtree(sandbox_runtime, ignore_errors=True)
+            if not cleanup_runtime(sandbox_runtime):
+                return ExecutionResult(ExecutionStatus.CLEANUP_FAILED, None, "", "",
+                                       f"{exc}; sandbox cleanup could not be proven",
+                                       cleanup_complete=False)
         return ExecutionResult(ExecutionStatus.START_FAILED, None, "", "", str(exc))
     assert process.stdout is not None and process.stderr is not None
     usage = [0]
@@ -240,4 +243,4 @@ async def run(invocation: Invocation, cwd: Path, timeout_seconds: float = 900,
         return result
     finally:
         if sandbox_runtime is not None:
-            shutil.rmtree(sandbox_runtime, ignore_errors=True)
+            cleanup_runtime(sandbox_runtime)

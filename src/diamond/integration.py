@@ -118,13 +118,33 @@ def _one(records: tuple[EvidenceRecord, ...], kind: str) -> EvidenceRecord:
     return selected[0]
 
 
+def _creation_revision(ledger: EventStore, task_id: str) -> int:
+    """Return the revision recorded by the task's append-only TASK_CREATED event.
+
+    That revision is the immutable creation authorization an attempt is bound
+    to.  The task's *current* revision legitimately advances through
+    execution-state updates (begin_execution/complete_execution) while the task
+    remains in its CREATED foundation state, so it is not the right reference
+    point for authorizing a published source author.
+    """
+    created = next((event for event in ledger.events(task_id) if event.event_type == "TASK_CREATED"), None)
+    if created is None:
+        raise ConflictError("author task has no immutable creation event")
+    return created.revision
+
+
 def _author(ledger: EventStore, snapshot: WorkflowSnapshot, identity: dict[str, Any], role: Role) -> tuple[dict[str, Any], tuple[EvidenceRecord, ...]]:
     attempt = ledger.replay_attempt(task_id(identity["attempt_id"]))
     task = ledger.replay(task_id(identity["task_id"]))
     spec = snapshot.spec
     provider = spec.builder_provider if role is Role.BUILDER else spec.debugger_provider
-    if task != ledger.get(task.spec.task_id) or task.status is not TaskStatus.CREATED or task.revision != attempt.task_revision:
-        raise ConflictError("author task authorization differs from its immutable creation")
+    creation_revision = _creation_revision(ledger, task.spec.task_id)
+    if task.status is not TaskStatus.CREATED or attempt.task_revision != creation_revision:
+        raise ConflictError(
+            f"author task authorization differs from its immutable creation "
+            f"(status={task.status.value}, task_revision={task.revision}, "
+            f"attempt_task_revision={attempt.task_revision}, creation_revision={creation_revision})"
+        )
     if (attempt.task_id, attempt.role, attempt.provider, attempt.workspace_root) != (task.spec.task_id, role, provider, spec.workspace_root):
         raise ValidationError("workflow author identity, role, provider or workspace is unauthorized")
     if (task.spec.role, task.spec.provider, task.spec.objective, task.spec.required_tests, task.spec.owned_paths,

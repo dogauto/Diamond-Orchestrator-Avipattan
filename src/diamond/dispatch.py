@@ -52,12 +52,16 @@ class DispatchClaim:
 
 
 def reserve(store: "EventStore", packet: TaskPacket, attempt: ExecutionAttempt, owner: str,
-            command_id: str, max_workers: int) -> tuple[DispatchClaim, ExecutionAttempt]:
+            command_id: str, max_workers: int, *, provider_metadata=None,
+            available_capabilities: tuple[str, ...] = (), available_tools: tuple[str, ...] = (),
+            permission_mode: str = "plan", dependencies_satisfied: bool = False) -> tuple[DispatchClaim, ExecutionAttempt]:
     if not isinstance(packet, TaskPacket) or not isinstance(attempt, ExecutionAttempt):
         raise ValidationError("reserve_dispatch requires a validated packet and attempt")
     validate_command_id(command_id)
     text(owner, "dispatch owner", 256)
     bounded_int(max_workers, "dispatch max_workers", 1, 64)
+    if type(dependencies_satisfied) is not bool:
+        raise ValidationError("dependencies_satisfied must be boolean")
     packet.verify_workspace()
     if attempt.status is not AttemptStatus.INTENDED or attempt.revision != 1:
         raise ValidationError("dispatch reservation requires a new INTENDED attempt")
@@ -70,7 +74,8 @@ def reserve(store: "EventStore", packet: TaskPacket, attempt: ExecutionAttempt, 
     if redact_text(packet_json) != packet_json:
         raise ValidationError("dispatch packet contains credential-like text; remove it before dispatch")
     request = canonical_json({"operation": "dispatch_claim", "packet_digest": packet.packet_digest(),
-                              "attempt": attempt.to_dict(), "owner": owner, "max_workers": max_workers})
+                              "attempt": attempt.to_dict(), "owner": owner, "max_workers": max_workers,
+                              "dependencies_satisfied": dependencies_satisfied})
     intent_command = f"{command_id}:intent"
     validate_command_id(intent_command)
     with store._connection(write=True) as connection:
@@ -87,7 +92,7 @@ def reserve(store: "EventStore", packet: TaskPacket, attempt: ExecutionAttempt, 
             raise ConflictError("dispatch packet task revision is stale; reload the task")
         if current.status is not TaskStatus.CREATED:
             raise ExecutionGuardError("only CREATED tasks can reserve this bounded dispatch")
-        if current.spec.dependencies:
+        if current.spec.dependencies and not dependencies_satisfied:
             raise ExecutionGuardError("dependent-task acceptance must be integrated before this task dispatches")
         if (current.spec.role, current.spec.provider, current.spec.objective) != (packet.role, packet.provider, packet.objective):
             raise ValidationError("dispatch packet differs from its persisted task specification")
@@ -109,8 +114,34 @@ def reserve(store: "EventStore", packet: TaskPacket, attempt: ExecutionAttempt, 
                             packet.task_id, packet.attempt_id)
         if connection.execute("SELECT 1 FROM attempts WHERE attempt_id=?", (attempt.attempt_id,)).fetchone():
             raise ConflictError("attempt already exists; use its original dispatch command")
-        store._insert_attempt(connection, attempt, intent_command,
-                              canonical_json({"operation": "attempt_begin", "attempt": attempt.to_dict()}))
+        bound_attempt = store._bind_attempt_connection(
+            connection, packet, attempt, provider_metadata,
+            available_capabilities=available_capabilities,
+            available_tools=available_tools,
+        )
+        store._insert_attempt(connection, bound_attempt, intent_command,
+                              canonical_json({"operation": "attempt_begin", "attempt": bound_attempt.to_dict(),
+                                              "available_capabilities": list(available_capabilities),
+                                              "available_tools": list(available_tools),
+                                              "permission_mode": permission_mode}))
+        accepted = store._decode_accepted_packet(connection.execute(
+            "SELECT * FROM accepted_packets WHERE accepted_packet_id=?",
+            (bound_attempt.accepted_packet_id,),
+        ).fetchone())
+        metadata = store._decode_provider_metadata(connection.execute(
+            "SELECT * FROM provider_metadata WHERE provider_id=?",
+            (bound_attempt.provider_id,),
+        ).fetchone())
+        capability_names = available_capabilities or tuple(
+            capability for skill in packet.skills for capability in skill.required_capabilities
+        )
+        store._bind_capabilities_connection(
+            connection, packet, accepted, metadata,
+            f"capability-{packet.packet_digest()[:40]}",
+            available_capabilities=capability_names,
+            available_tools=available_tools or packet.allowed_tools,
+            permission_mode=permission_mode,
+        )
         claim = DispatchClaim(attempt.attempt_id, packet.task_id, packet.task_revision, packet.attempt_id,
                               packet.packet_digest(), owner, utc_now())
         connection.execute("""INSERT INTO dispatch_claims
@@ -118,7 +149,7 @@ def reserve(store: "EventStore", packet: TaskPacket, attempt: ExecutionAttempt, 
             VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
                            (claim.claim_id, claim.schema_version, claim.task_id, claim.task_revision,
                             claim.attempt_id, claim.packet_digest, packet_json, claim.owner, claim.created_at, command_id, request))
-        return claim, attempt
+        return claim, bound_attempt
 
 
 def acquire_start(store: "EventStore", claim: DispatchClaim, command_id: str) -> ExecutionAttempt:
@@ -141,7 +172,10 @@ def acquire_start(store: "EventStore", claim: DispatchClaim, command_id: str) ->
         protect_owned_paths(connection, tuple(Path(packet["workspace_root"]) / value for value in packet["owned_paths"]),
                             claim.task_id, claim.attempt_id)
         task = store._read_task(connection, claim.task_id)
-        if task.revision != claim.task_revision or task.status is not TaskStatus.CREATED:
+        if task.status is not TaskStatus.CREATED:
+            raise ConflictError("task authorization changed after reservation; launch refused")
+        # Allow task revision to have increased by begin_execution (revision +1)
+        if task.revision != claim.task_revision and task.revision != claim.task_revision + 1:
             raise ConflictError("task authorization changed after reservation; launch refused")
         if current.status is not AttemptStatus.INTENDED or current.revision != 1:
             raise ConflictError("attempt already advanced; refusing blind relaunch")

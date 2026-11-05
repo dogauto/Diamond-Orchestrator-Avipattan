@@ -10,6 +10,7 @@ from .adapters import Invocation
 from .domain import Provider, Role, TaskSpec
 from .errors import ValidationError
 from .skills import SkillRecord, SkillRegistry
+from .provider_contracts import provider_identifier
 from .validation import bounded_int, canonical_json, task_id, text
 
 
@@ -127,6 +128,9 @@ class TaskPacket:
     selection_digest: str | None = None
     effective_prompt_digest: str | None = None
     profile_binding_json: str | None = None
+    provider_id: str | None = None
+    adapter_id: str | None = None
+    execution_policy: str | None = None
 
     def __post_init__(self) -> None:
         task_id(self.task_id)
@@ -166,6 +170,18 @@ class TaskPacket:
                 raise ValidationError("provider_tools must be an immutable tuple or None")
             for tool in self.provider_tools:
                 text(tool, "provider tool", 128)
+        if self.provider_id is not None:
+            provider_identifier(self.provider_id)
+            if self.provider_id in {item.value for item in Provider} and self.provider_id != self.provider.value:
+                raise ValidationError("provider_id conflicts with the legacy provider identity")
+        if self.adapter_id is not None:
+            text(self.adapter_id, "adapter ID", 256)
+        if self.adapter_id is not None and self.provider_id is None:
+            raise ValidationError("adapter_id requires provider_id")
+        if self.execution_policy is not None and self.execution_policy not in {"read_only", "writable"}:
+            raise ValidationError("execution policy must be read_only or writable")
+        if self.execution_policy is not None and self.provider_id is None:
+            raise ValidationError("execution policy requires provider_id")
         if type(self.task_tags) is not tuple or len(self.task_tags) > 64:
             raise ValidationError("task_tags must be an immutable tuple of at most 64 values")
         for tag in self.task_tags:
@@ -242,6 +258,16 @@ class TaskPacket:
             target = (root / artifact.relative_path).resolve()
             if not target.is_relative_to(root):
                 raise ValidationError(f"context artifact escapes workspace: {artifact.relative_path}")
+
+    @property
+    def stable_provider_id(self) -> str:
+        """Return the canonical provider identity used by adapter bindings."""
+        return self.provider_id or self.provider.value
+
+    @property
+    def stable_adapter_id(self) -> str:
+        """Return the canonical adapter identity, including legacy packets."""
+        return self.adapter_id or f"legacy:{self.provider.value}"
 
     def verify_current(self, plan_revision: int, plan_digest: str, base_digest: str,
                        config_digest: str, task_revision: int | None = None) -> None:
@@ -374,7 +400,12 @@ class TaskPacket:
         if self.schema_version == 2:
             result.update(task_tags=list(self.task_tags), profile_id=self.profile_id, profile_version=self.profile_version,
                           profile_digest=self.profile_digest, selection_digest=self.selection_digest,
-                          effective_prompt_digest=self.effective_prompt_digest, profile_binding_json=self.profile_binding_json)
+                          effective_prompt_digest=self.effective_prompt_digest, profile_binding_json=self.profile_binding_json,
+                          provider_id=self.provider_id, adapter_id=self.adapter_id,
+                          execution_policy=self.execution_policy)
+        elif any(value is not None for value in (self.provider_id, self.adapter_id, self.execution_policy)):
+            result.update(provider_id=self.provider_id, adapter_id=self.adapter_id,
+                          execution_policy=self.execution_policy)
         return result
 
     @classmethod
@@ -386,7 +417,12 @@ class TaskPacket:
         profile_fields = {"task_tags", "profile_id", "profile_version", "profile_digest", "selection_digest",
                           "effective_prompt_digest", "profile_binding_json"}
         keys = {field.name for field in fields(cls)} - (profile_fields if value["schema_version"] == 1 else set())
-        data = dict(exact_keys(value, keys, "TaskPacket"))
+        legacy_keys = keys - {"provider_id", "adapter_id", "execution_policy"}
+        if set(value) == legacy_keys:
+            data = dict(value)
+            data.update(provider_id=None, adapter_id=None, execution_policy=None)
+        else:
+            data = dict(exact_keys(value, keys, "TaskPacket"))
         try:
             data.update(role=Role(data["role"]), provider=Provider(data["provider"]))
             for name in ("owned_paths", "allowed_tools", "required_tests", "acceptance_conditions", "skills", "context_artifacts"):

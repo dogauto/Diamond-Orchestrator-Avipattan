@@ -39,7 +39,7 @@ def provider_command(args: argparse.Namespace, paths: ProjectPaths, config: Diam
     if args.provider_command == "list":
         local = [{"provider": name.value, "status": "enabled" if entry.enabled else "disabled",
                   "version": None, "executable": entry.executable, "auth_status": "NOT_CHECKED"}
-                 for name, entry in config.providers.items()]
+                 for name, entry in config.providers.items() if name.value != "freellmapi"]
         gateway: dict[str, Any] = {"provider": "freellmapi", "configured": False,
                                    "auth_status": "NOT_CHECKED", "workflow_execution": "UNAVAILABLE"}
         if gateway_path.exists() or gateway_path.is_symlink():

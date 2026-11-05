@@ -27,8 +27,16 @@ def provider_response(ledger: EventStore, snapshot: DeliverySnapshot, role: Role
     if (attempt.task_id, attempt.role, attempt.provider, attempt.workspace_root, attempt.status, attempt.returncode) != (
             task.spec.task_id, role, snapshot.spec.provider(role), snapshot.spec.workspace_root, AttemptStatus.SUCCEEDED, 0):
         raise ExecutionGuardError("delivery approval has no authorized successful role attempt")
-    if (task.spec.role != role or task.spec.provider != attempt.provider or ledger.get(task.spec.task_id) != task
-            or task.status is not TaskStatus.CREATED or task.revision != attempt.task_revision):
+    current_task = ledger.get(task.spec.task_id)
+    current_spec = current_task.spec.to_dict()
+    task_spec = task.spec.to_dict()
+    current_spec.pop("workspace_root_value", None)
+    task_spec.pop("workspace_root_value", None)
+    if (task.spec.role != role or task.spec.provider != attempt.provider
+            or current_task.revision != task.revision
+            or current_task.status is not task.status
+            or current_spec != task_spec
+            or task.status is not TaskStatus.CREATED):
         raise ExecutionGuardError("role task authorization changed")
     record = evidence(ledger, provider_evidence_id)
     payload = parse_canonical_json(record.payload_json)
