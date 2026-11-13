@@ -118,7 +118,7 @@ class CliTests(ProjectCase):
                 code = main(["--project", str(self.project), "doctor", "--json"])
             self.assertEqual(code, 1 if missing else 0)
             data = json.loads(stdout.getvalue())
-            self.assertEqual(len(data["result"]["providers"]), 6)
+            self.assertEqual(len(data["result"]["providers"]), 7)
             self.assertEqual(data["result"]["auth_status"], "NOT_CHECKED")
             self.assertEqual(data["result"]["workflow_execution"], "UNAVAILABLE")
             self.assertEqual(stderr.getvalue(), "")
@@ -135,7 +135,7 @@ class CliTests(ProjectCase):
         result = self.cli_process("doctor", "--json", environment={"PATH": str(binary_dir)})
         self.assertEqual(result.returncode, 0, result.stderr)
         data = json.loads(result.stdout)
-        self.assertEqual([probe["version"] for probe in data["result"]["providers"]], ["1.2.3"] * 6)
+        self.assertEqual([probe["version"] for probe in data["result"]["providers"]], ["1.2.3"] * 7)
         self.assertFalse((self.project / ".diamond").exists())
 
     def test_project_status_json_is_complete_and_provider_probe_is_bounded(self) -> None:
@@ -153,7 +153,7 @@ class CliTests(ProjectCase):
         data = json.loads(result.stdout)
         self.assertTrue(data["ok"])
         self.assertEqual(set(data["result"]), {"config", "deliveries", "project", "providers", "skills", "workflows"})
-        self.assertEqual(len(data["result"]["providers"]), 6)
+        self.assertEqual(len(data["result"]["providers"]), 7)
         self.assertEqual(data["result"]["skills"], [])
         self.assertEqual(data["result"]["workflows"], [])
         self.assertEqual(data["result"]["deliveries"], [])

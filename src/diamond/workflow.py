@@ -95,8 +95,11 @@ def prompt(snapshot: WorkflowSnapshot, reproduction: dict[str, object] | None) -
     sources = []
     for relative in spec.owned_paths:
         existing = entries.get(relative)
-        sources.append({"relative_path": relative, "base_sha256": existing["sha256"] if existing else None,
-                        "content": (Path(spec.workspace_root) / relative).read_text(encoding="utf-8") if existing else None})
+        if existing and existing.get("kind") == "file":
+            sources.append({"relative_path": relative, "base_sha256": existing.get("sha256"),
+                            "content": (Path(spec.workspace_root) / relative).read_text(encoding="utf-8")})
+        else:
+            sources.append({"relative_path": relative, "base_sha256": None, "content": None})
     role = Role.DEBUGGER if reproduction is not None else Role.BUILDER
     catalog = load_skill_catalog(Path(spec.workspace_root))
     content = {"objective": spec.objective, "role": role.value, "owned_files": sources,

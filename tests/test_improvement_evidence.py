@@ -101,9 +101,10 @@ class ImprovementEvidenceTests(ProjectCase):
             record_disposition(*args[:-1], "disposition:2")
 
     def test_schema7_migration_is_explicit_transactional_and_backup_valid(self):
+        from diamond.schema import HISTORICAL_SCHEMA_CONTRACTS
         self.ledger.database.parent.mkdir()
         with closing(sqlite3.connect(self.ledger.database)) as connection:
-            for statement in SCHEMA_STATEMENTS[:43]:
+            for statement in HISTORICAL_SCHEMA_CONTRACTS[7]:
                 connection.execute(statement)
             connection.execute("PRAGMA user_version=7")
             connection.commit()
@@ -114,7 +115,9 @@ class ImprovementEvidenceTests(ProjectCase):
                 self.ledger.migrate()
         with closing(sqlite3.connect(self.ledger.database)) as connection:
             self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 7)
+            # v7 does NOT include improvement tables (added in 7->8 migration)
             self.assertIsNone(connection.execute("SELECT name FROM sqlite_master WHERE name='improvement_publications'").fetchone())
+            self.assertIsNone(connection.execute("SELECT name FROM sqlite_master WHERE name='agent_identities'").fetchone())
         self.assertEqual(self.ledger.migrate(), SCHEMA_VERSION)
         record = self.record(self.attempt())
         backup = self.ledger.backup(self.base.resolve() / "backup.sqlite3")

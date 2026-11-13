@@ -17,11 +17,28 @@ class ControllerConfig:
     max_workers: int
     task_timeout_seconds: int
     correction_round_limit: int
+    approval_expiry_sweep_interval_seconds: int = 60
+    watchdog_evaluation_interval_seconds: int = 60
 
     def __post_init__(self) -> None:
         bounded_int(self.max_workers, "controller.max_workers", 1, 64)
         bounded_int(self.task_timeout_seconds, "controller.task_timeout_seconds", 1, 86_400)
         bounded_int(self.correction_round_limit, "controller.correction_round_limit", 0, 100)
+        bounded_int(self.approval_expiry_sweep_interval_seconds, "controller.approval_expiry_sweep_interval_seconds", 10, 3600)
+        bounded_int(self.watchdog_evaluation_interval_seconds, "controller.watchdog_evaluation_interval_seconds", 10, 3600)
+
+    @classmethod
+    def with_defaults(cls, **kwargs) -> "ControllerConfig":
+        """Create ControllerConfig with defaults for missing optional fields."""
+        defaults = {
+            "max_workers": 2,
+            "task_timeout_seconds": 900,
+            "correction_round_limit": 2,
+            "approval_expiry_sweep_interval_seconds": 60,
+            "watchdog_evaluation_interval_seconds": 60,
+        }
+        defaults.update(kwargs)
+        return cls(**defaults)
 
 
 @dataclass(frozen=True)
@@ -82,7 +99,16 @@ def parse_config(source: str) -> DiamondConfig:
         if len(source) > MAX_CONFIG_BYTES or len(source.encode("utf-8")) > MAX_CONFIG_BYTES:
             raise ConfigError("config source must be at most 1 MiB of UTF-8 text")
         data = exact_keys(tomllib.loads(source), {"schema_version", "project_name", "controller", "providers", "roles"}, "config")
-        controller = ControllerConfig(**exact_keys(data["controller"], {"max_workers", "task_timeout_seconds", "correction_round_limit"}, "controller"))
+        controller_data = data["controller"]
+        # Extract optional fields with defaults
+        controller_kwargs = {
+            "max_workers": controller_data.get("max_workers", 2),
+            "task_timeout_seconds": controller_data.get("task_timeout_seconds", 900),
+            "correction_round_limit": controller_data.get("correction_round_limit", 2),
+            "approval_expiry_sweep_interval_seconds": controller_data.get("approval_expiry_sweep_interval_seconds", 60),
+            "watchdog_evaluation_interval_seconds": controller_data.get("watchdog_evaluation_interval_seconds", 60),
+        }
+        controller = ControllerConfig(**controller_kwargs)
         provider_data = dict(data["providers"])
         if "freellmapi" not in provider_data:
             provider_data["freellmapi"] = {"executable": "freellmapi", "enabled": False}

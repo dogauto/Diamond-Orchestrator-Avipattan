@@ -254,7 +254,7 @@ class DiagnosticTests(ProjectCase):
         config = parse_config(source)
         with patch("diamond.diagnostics.probe_version", side_effect=lambda provider, executable: SimpleNamespace(provider=provider, status="available")) as probe:
             results = doctor(config)
-        self.assertEqual(len(results), 6)
+        self.assertEqual(len(results), 7)
         self.assertEqual(results[0].status, "disabled")
         self.assertEqual(probe.call_count, 5)
         self.assertNotIn(Provider.GEMINI, [call.args[0] for call in probe.call_args_list])

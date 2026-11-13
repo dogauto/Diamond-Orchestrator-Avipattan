@@ -8,6 +8,8 @@ from uuid import uuid4
 
 from .dispatch import DispatchClaim, acquire_start, reserve
 from .capability_store import CapabilityBindingStoreMixin
+from .policy_binding_store import PolicyIPCStoreMixin
+from .approval_store import ApprovalStoreMixin
 from .domain import FOUNDATION_STATES, LedgerEvent, TaskSnapshot, TaskSpec, TaskStatus
 from .execution_store import ExecutionStateStoreMixin
 from .provider_store import ProviderMetadataStoreMixin
@@ -26,7 +28,7 @@ from .validation import (bounded_int, canonical_json, command_id as validate_com
 
 
 class EventStore(CapabilityBindingStoreMixin, ProviderMetadataStoreMixin, ExecutionStateStoreMixin,
-                 AgentRuntimeStoreMixin, AgentMessagingStoreMixin):
+                 AgentRuntimeStoreMixin, AgentMessagingStoreMixin, PolicyIPCStoreMixin, ApprovalStoreMixin):
     def __init__(self, database: Path, busy_timeout_ms: int = 5000) -> None:
         if not isinstance(database, Path) or not database.is_absolute():
             raise ValidationError("database must be an absolute pathlib.Path")
@@ -231,7 +233,7 @@ class EventStore(CapabilityBindingStoreMixin, ProviderMetadataStoreMixin, Execut
 
     @staticmethod
     def _attempt_values(attempt: ExecutionAttempt) -> tuple[object, ...]:
-        return EventStore._attempt_values_full(attempt)[:-2]
+        return EventStore._attempt_values_full(attempt)
 
     @staticmethod
     def _attempt_values_full(attempt: ExecutionAttempt) -> tuple[object, ...]:
