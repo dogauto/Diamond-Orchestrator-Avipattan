@@ -5,6 +5,8 @@ project_name = "Flawless Diamond Piece"
 max_workers = 2
 task_timeout_seconds = 900
 correction_round_limit = 2
+approval_expiry_sweep_interval_seconds = 60
+watchdog_evaluation_interval_seconds = 60
 
 # Portable command names; enabled does not establish auth or live readiness.
 [providers.gemini]
