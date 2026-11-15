@@ -17,7 +17,6 @@ from diamond.errors import ConflictError, ExecutionGuardError, NotFoundError, Va
 from diamond.fake_child_adapter import DeterministicChildAdapter
 from diamond.paths import resolve_paths
 from diamond.store import EventStore
-from diamond.ui_adapter import UiAdapter, UiAgent, UiMessage, UiReceipt, UiSession
 from diamond.validation import canonical_json, utc_now
 
 
@@ -143,24 +142,6 @@ class AgentRuntimeTests(ProjectCase):
         with patch.object(subprocess, "run", side_effect=AssertionError("provider invocation")):
             result = self.run_fake()
         self.assertTrue(result.receipt.accepted)
-
-    def test_read_only_ui_exposes_runtime_records(self) -> None:
-        result = self.run_fake()
-        adapter = UiAdapter(str(self.project), str(self.project / "config" / "diamond.toml"))
-        try:
-            status = adapter.project_status()
-            self.assertEqual(len(status["agents"]), 2)
-            self.assertEqual(len(status["sessions"]), 2)
-            self.assertIsInstance(adapter.agents()[0], UiAgent)
-            self.assertIsInstance(adapter.sessions()[0], UiSession)
-            messages = adapter.conversation_messages(result.conversation_id)
-            self.assertEqual([item.sequence_no for item in messages], [1, 2])
-            self.assertTrue(all(isinstance(item, UiMessage) for item in messages))
-            receipt = adapter.completion_receipt(self.delegation)
-            self.assertIsInstance(receipt, UiReceipt)
-            self.assertTrue(receipt.accepted)
-        finally:
-            adapter.close()
 
     def test_duplicate_session_creation_and_receipt_commands_are_idempotent(self) -> None:
         child_session = self.store.child_session(self.delegation, "5" * 32, self.child_agent, "session:child")

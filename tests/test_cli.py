@@ -135,7 +135,12 @@ class CliTests(ProjectCase):
         result = self.cli_process("doctor", "--json", environment={"PATH": str(binary_dir)})
         self.assertEqual(result.returncode, 0, result.stderr)
         data = json.loads(result.stdout)
-        self.assertEqual([probe["version"] for probe in data["result"]["providers"]], ["1.2.3"] * 7)
+        providers = data["result"]["providers"]
+        self.assertEqual(len(providers), 7)
+        # Six CLI providers with fake 1.2.3; FreeLLMAPI is disabled by config.
+        versions = [p["version"] for p in providers]
+        self.assertEqual(versions.count("1.2.3"), 6)
+        self.assertEqual(versions.count(None), 1)
         self.assertFalse((self.project / ".diamond").exists())
 
     def test_project_status_json_is_complete_and_provider_probe_is_bounded(self) -> None:
@@ -157,7 +162,9 @@ class CliTests(ProjectCase):
         self.assertEqual(data["result"]["skills"], [])
         self.assertEqual(data["result"]["workflows"], [])
         self.assertEqual(data["result"]["deliveries"], [])
-        self.assertEqual({probe["status"] for probe in data["result"]["providers"]}, {"available"})
+        # FreeLLMAPI is disabled by config; six CLI providers are available.
+        statuses = {probe["status"] for probe in data["result"]["providers"]}
+        self.assertEqual(statuses, {"available", "disabled"})
         self.assertFalse((self.project / ".diamond").exists())
 
     def test_route_explain_is_read_only_and_does_not_launch_provider(self) -> None:
@@ -228,7 +235,11 @@ class CliTests(ProjectCase):
         data = json.loads(result.stdout)
         self.assertFalse(data["ok"])
         self.assertNotIn("error", data)
-        self.assertEqual([probe["status"] for probe in data["result"]["providers"]], ["invalid_output"] + ["available"] * 5)
+        statuses = [probe["status"] for probe in data["result"]["providers"]]
+        self.assertEqual(len(statuses), 7)
+        self.assertEqual(statuses.count("invalid_output"), 1)
+        self.assertEqual(statuses.count("available"), 5)
+        self.assertEqual(statuses.count("disabled"), 1)
         self.assertEqual(result.stderr, "")
         self.assertFalse((self.project / ".diamond").exists())
 

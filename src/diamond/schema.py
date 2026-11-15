@@ -504,15 +504,7 @@ _MIGRATION_9_TO_10_START = _TRIAL_START
 _RUNTIME_START = len(SCHEMA_STATEMENTS) - len(CAPABILITY_SCHEMA_STATEMENTS) - len(RUNTIME_SCHEMA_STATEMENTS)
 MIGRATION_10_TO_11 = RUNTIME_SCHEMA_STATEMENTS
 MIGRATION_11_TO_12 = CAPABILITY_SCHEMA_STATEMENTS
-MIGRATION_12_TO_13 = POLICY_IPC_SCHEMA_STATEMENTS + (
-    """CREATE TRIGGER provider_metadata_no_update BEFORE UPDATE ON provider_metadata
-        BEGIN SELECT RAISE(ABORT, 'provider_metadata is managed by controller'); END""",
-    """CREATE TRIGGER provider_metadata_no_delete BEFORE DELETE ON provider_metadata
-        BEGIN SELECT RAISE(ABORT, 'provider_metadata is managed by controller'); END""",
-    """CREATE TRIGGER provider_metadata_no_replace BEFORE INSERT ON provider_metadata WHEN EXISTS (
-        SELECT 1 FROM provider_metadata WHERE provider_id=NEW.provider_id)
-        BEGIN SELECT RAISE(ABORT, 'provider_metadata cannot be replaced'); END""",
-)
+MIGRATION_12_TO_13 = POLICY_IPC_SCHEMA_STATEMENTS
 MIGRATION_13_TO_14 = APPROVAL_SCHEMA_STATEMENTS
 MIGRATION_14_TO_15 = (
     """CREATE TABLE agent_runtime_events_new (
