@@ -4,7 +4,7 @@
 
 <div align="center">
 
-<img src="./assets/dimond-logo.svg" alt="Dimond Logo" width="320" />
+<img src="./assets/dimond-logo.png" alt="Dimond Logo" width="320" />
 
 <h1 style="font-family:'Cinzel',serif;letter-spacing:0.08em;">Diamond</h1>
 
