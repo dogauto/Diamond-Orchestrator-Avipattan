@@ -32,6 +32,7 @@ from diamond.provider_registry import ProviderRegistry
 from diamond.skills import SkillRegistry
 from diamond.store import EventStore
 from diamond.validation import utc_now
+from tests.policy_fixtures import write_valid_policy
 from tests.support import ProjectCase, ROOT
 from tests.test_generic_execution import CountingAdapter
 
@@ -285,11 +286,7 @@ class OrchestrationCliTests(ProjectCase):
         return code, json.loads(output.getvalue())
 
     def _copy_policy_inputs(self) -> None:
-        for name in ("CLAUDE.md", "CONSTRAINTS.md"):
-            (self.project / name).write_text(
-                (ROOT / name).read_text(encoding="utf-8"),
-                encoding="utf-8",
-            )
+        write_valid_policy(self.project)
         src = self.project / "src" / "diamond"
         src.mkdir(parents=True, exist_ok=True)
         for name in ("controller.py", "routing.py", "orchestration.py", "scheduler.py"):
