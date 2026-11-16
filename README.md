@@ -13,7 +13,7 @@
 ---
 *A product of* [**kósmos of Paradox**](https://github.com/kosmosofparadox) · *We exist nowhere but exist in everywhere.*
 
-[Project aim] · [System design] · [Verification] · [Status]
+[Project aim](docs/aim/PROJECT_AIM.md) · [System design](docs/architecture/SYSTEM_DESIGN.md) · [Verification](docs/verification/PHASE_GATES.md) · [Status](docs/progress/STATUS.md)
 
 </div>
 
@@ -27,4 +27,4 @@ A Python orchestrator for bounded, evidence-backed AI coding workflows. Multi-pr
 - Records every attempt in a local SQLite ledger
 - Requires evidence before state moves forward
 
-`[See docs →](docs/README.md)`
+[See docs →](docs/README.md)
