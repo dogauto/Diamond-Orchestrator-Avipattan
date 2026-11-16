@@ -254,7 +254,8 @@ class StressTests(ProjectCase):
             reopened = EventStore(self.store.database)
             self.assertEqual(reopened.replay_attempt(attempt.attempt_id), completed)
             self.assertEqual(Counter(item.kind for item in reopened.evidence(packet.task_id)),
-                             {"launch_intent": 1, "process_started": 1, "provider_result": 1})
+                             {"launch_intent": 1, "process_started": 1, "provider_result": 1,
+                              "revocation_result": 1})
 
         async def batch():
             await asyncio.gather(*(scenario(i + 1, *bodies[i % 4]) for i in range(12)))

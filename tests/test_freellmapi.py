@@ -187,7 +187,7 @@ class FreeLLMAPIFileAndCliTests(ProjectCase):
              patch("diamond.freellmapi.request_json", side_effect=AssertionError("must not connect")):
             code, result = self.call("list")
             self.assertEqual(code, 0)
-            self.assertEqual(len(result["result"]["providers"]), 8)
+            self.assertEqual(len(result["result"]["providers"]), 7)
             self.assertFalse(result["result"]["providers"][-1]["configured"])
             human = self.cli_process("provider", "list", environment={"PATH": ""})
             self.assertEqual(human.returncode, 0, human.stderr)
