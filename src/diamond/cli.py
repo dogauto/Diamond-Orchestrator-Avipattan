@@ -264,6 +264,30 @@ def parser() -> argparse.ArgumentParser:
     for command in (profile_preview, profile_trial, profile_template, profile_register, profile_list, profile_show,
                     profile_cancel, profile_assign, profile_outcome):
         command.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+
+    approvals = commands.add_parser("approvals", help="persistent human approval state for ASK decisions")
+    approval_commands = approvals.add_subparsers(dest="approval_command", required=True)
+    approval_list = approval_commands.add_parser("list", help="list approval requests")
+    approval_list.add_argument("--status", choices=("PENDING", "APPROVED", "DENIED", "EXPIRED", "CANCELLED"))
+    approval_list.add_argument("--agent-id")
+    approval_list.add_argument("--task-id")
+    approval_show = approval_commands.add_parser("show", help="show one approval request")
+    approval_show.add_argument("approval_id")
+    approval_approve = approval_commands.add_parser("approve", help="approve a PENDING request (authorized human only)")
+    approval_approve.add_argument("approval_id")
+    approval_approve.add_argument("--approver", required=True, help="authenticated human operator identity")
+    approval_approve.add_argument("--evidence", help="JSON decision evidence payload")
+    approval_approve.add_argument("--command-id", required=True)
+    approval_deny = approval_commands.add_parser("deny", help="deny a PENDING request (authorized human only)")
+    approval_deny.add_argument("approval_id")
+    approval_deny.add_argument("--approver", required=True, help="authenticated human operator identity")
+    approval_deny.add_argument("--reason", required=True)
+    approval_deny.add_argument("--command-id", required=True)
+    approval_cancel = approval_commands.add_parser("cancel", help="cancel a PENDING request")
+    approval_cancel.add_argument("approval_id")
+    approval_cancel.add_argument("--command-id", required=True)
+    for command in (approval_list, approval_show, approval_approve, approval_deny, approval_cancel):
+        command.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     return root
 
 
@@ -276,7 +300,7 @@ def _run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         return {"config": str(paths.config), "valid": True, "project_name": config.project_name}, 0
     if args.command == "doctor":
         assert config is not None
-        probes = tuple(result for result in doctor(config) if result.provider is not Provider.FREELLMAPI)
+        probes = tuple(doctor(config))
         ok = all(result.status in {"available", "disabled"} for result in probes)
         return {"providers": [result.to_dict() for result in probes], "auth_status": "NOT_CHECKED",
                 "workflow_execution": "UNAVAILABLE"}, 0 if ok else 1
@@ -295,8 +319,7 @@ def _run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
                            "source_url": provenance.source_url,
                            "applicable_roles": [role.value for role in record.applicable_roles]})
         return {"project": str(paths.project), "config": str(paths.config),
-                "providers": [result.to_dict() for result in doctor(config)
-                              if result.provider is not Provider.FREELLMAPI],
+                "providers": [result.to_dict() for result in doctor(config)],
                 "skills": skills,
                 "workflows": [item.to_dict() for item in WorkflowStore(store).list()],
                 "deliveries": [item.to_dict() for item in DeliveryStore(store).list()]}, 0
@@ -305,6 +328,9 @@ def _run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         assert config is not None
         return provider_command(args, paths, config)
     store = EventStore(paths.database)
+    if args.command == "approvals":
+        from .approval_cli import approval_command
+        return approval_command(args, paths, config)
     if args.command == "route":
         from .provider_health import ProviderHealthStore
         from .routing import explain_provider_route, load_routing_policy

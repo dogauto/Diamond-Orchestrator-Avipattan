@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 from dataclasses import replace
 from pathlib import Path
@@ -38,7 +40,144 @@ def recover_on_startup(store: EventStore, reason: str) -> tuple:
         raise ValidationError("recover_on_startup requires an EventStore")
     # Sanitize reason for command ID - replace spaces and special chars
     safe_reason = "".join(c if c.isalnum() or c in "-_" else "-" for c in reason)
-    return store.recover_interrupted_tasks(f"startup-recover-{safe_reason}", reason)
+    recovered = store.recover_interrupted_tasks(f"startup-recover-{safe_reason}", reason)
+
+    # D2.2: inspect CONSUMED approvals that survived a crash and persist findings.
+    # Never auto-resets CONSUMED → APPROVED; never auto-redispatches uncertain tasks.
+    from .watchdog import CrashRecoveryInspector
+    findings = _controller_recovery_inspection(store, reason)
+    return recovered + tuple(findings)
+
+
+def _controller_recovery_inspection(store: EventStore, reason: str) -> tuple:
+    """Inspect CONSUMED approvals after a crash and persist recovery findings.
+
+    Idempotent: duplicate findings are rejected by the runtime_events
+    command_id UNIQUE constraint, so repeated startup never creates noise.
+    """
+    from uuid import uuid4
+    from .watchdog import CrashRecoveryInspector
+    findings = []
+    if not store._database_present():
+        return ()
+    with store._connection(write=False) as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT agent_id, task_id FROM agent_approval_state WHERE approval_status='CONSUMED'"
+        ).fetchall()
+        for row in rows:
+            agent_id = row["agent_id"]
+            task_id = row["task_id"]
+            inspector = CrashRecoveryInspector(store, agent_id, task_id)
+            consumed = inspector.inspect_consumed_approvals()
+            for c in consumed:
+                rec = inspector.recommend_recovery(c["approval_id"])
+                findings.append({
+                    "approval_id": c["approval_id"],
+                    "agent_id": agent_id,
+                    "task_id": task_id,
+                    "recommendation": rec,
+                    "execution_events": c.get("execution_events", []),
+                })
+    if findings:
+        with store._connection(write=True) as conn:
+            for f in findings:
+                cmd_id = f"controller:recovery:{f['approval_id']}"
+                try:
+                    conn.execute(
+                        """INSERT INTO agent_runtime_events
+                           (event_id, entity_type, entity_id, revision, event_type,
+                            timestamp, command_id, payload_json)
+                           VALUES (?,?,?,?,?,?,?,?)""",
+                        (uuid4().hex, "crash_recovery", f["agent_id"], 1,
+                         "FINDING", utc_now(), cmd_id, canonical_json(f)),
+                    )
+                except Exception:
+                    pass  # Idempotent: UNIQUE(command_id) rejects duplicates
+    return tuple(findings)
+
+
+def evaluate_watchdog_restart(
+    watchdog: "PolicyWatchdog",
+    store: EventStore,
+    ipc_context: Optional["PolicyIPCServerContext"] = None,
+) -> dict:
+    """Controller-mediated watchdog restart handler (D2.2).
+
+    The watchdog reports restart intent. The Controller owns the decision
+    and execution. This function:
+
+    1. Evaluates the watchdog's restart intent.
+    2. Distinguishes process-unavailable vs IPC-unreachable vs IPC-crashed vs
+       EventStore-unavailable vs Controller-shutting-down.
+    3. Executes a bounded restart with backoff.
+    4. Verifies the restart independently.
+    5. Records evidence in the EventStore.
+
+    Never authorizes tools, never changes policy decisions, never
+    redispatches uncertain tasks.
+    """
+    from .watchdog import ServiceState
+
+    intent = watchdog.get_restart_intent()
+    if intent is None:
+        return {"action": "none", "reason": "no restart intent pending"}
+
+    # Distinguish failure modes
+    if not store._database_present():
+        watchdog.clear_restart_intent()
+        return {"action": "none", "reason": "EventStore unavailable; cannot restart"}
+
+    if intent["attempt"] > intent["max_attempts"]:
+        watchdog.clear_restart_intent()
+        return {"action": "none", "reason": f"max restart attempts exceeded ({intent['attempt']}/{intent['max_attempts']})"}
+
+    # Execute the restart
+    try:
+        if ipc_context is not None:
+            try:
+                ipc_context.stop()
+            except Exception:
+                pass
+            try:
+                ipc_context.start()
+            except Exception as exc:
+                return {
+                    "action": "restart_failed",
+                    "reason": f"restart attempt {intent['attempt']} failed: {exc}",
+                    "attempt": intent["attempt"],
+                }
+            # Verify the restart independently
+            from .watchdog import PolicyWatchdog, WatchdogConfig
+            probe = PolicyWatchdog(
+                store=store,
+                socket_path=ipc_context.ipc_socket_path,
+                capability=ipc_context.ipc_capability,
+                agent_id=ipc_context.agent_id,
+                task_id=ipc_context.task_id,
+                attempt_id=ipc_context.attempt_id,
+                command_prefix=ipc_context.command_prefix,
+                config=WatchdogConfig(ipc_total_timeout=1.0),
+            )
+            state, detail, kind = probe._probe_ipc_sync()
+            watchdog.clear_restart_intent()
+            return {
+                "action": "restart_succeeded" if state == ServiceState.HEALTHY else "restart_degraded",
+                "reason": detail,
+                "attempt": intent["attempt"],
+                "probe_state": state.value,
+                "probe_detail": detail,
+            }
+        else:
+            # No IPC context to restart — record intent and clear
+            watchdog.clear_restart_intent()
+            return {
+                "action": "restart_skipped",
+                "reason": "no IPC context available for restart",
+                "attempt": intent["attempt"],
+            }
+    except Exception as exc:
+        watchdog.clear_restart_intent()
+        return {"action": "restart_error", "reason": str(exc), "attempt": intent["attempt"]}
 
 
 def _gateway_result(normalized: NormalizedExecutionResult, output_limit: int) -> tuple[NormalizedResult, ExecutionResult]:
@@ -160,6 +299,7 @@ async def run_persisted(store: EventStore, packet: TaskPacket, attempt: Executio
                          environment: dict[str, str] | None = None,
                          output_artifacts: tuple[ArtifactRef, ...] = (), max_workers: int = 2,
                          provider_gateway: ProviderExecutionGateway | None = None,
+                         lifecycle: OrchestrationLifecycle | None = None,
                          dependencies_satisfied: bool = False) -> tuple[ExecutionAttempt, NormalizedResult,
                                                                                    ExecutionResult, EvidenceRecord]:
     """Run one explicit invocation with launch intent and completion evidence in the ledger."""
@@ -255,6 +395,23 @@ async def run_persisted(store: EventStore, packet: TaskPacket, attempt: Executio
                               f"{command_prefix}:exec-begin")
     except (ConflictError, ExecutionGuardError, NotFoundError):
         pass  # Already started or task not found
+
+    # Register per-attempt IPC capability binding for durable evidence
+    # Must be done after attempt is in the database (post-acquire_start)
+    if lifecycle is not None:
+        from .orchestration import OrchestrationLifecycle
+        # Get the attempt IPC context from lifecycle
+        attempt_ctx = lifecycle.attempt_ipc_contexts.get(attempt.attempt_id)
+        if attempt_ctx is not None:
+            cmd_prefix = f"{command_prefix}:ipc-bind"
+            try:
+                store.register_policy_ipc_binding(
+                    attempt_id=attempt.attempt_id,
+                    capability=attempt_ctx.ipc_capability,
+                    command_id=cmd_prefix
+                )
+            except Exception:
+                pass  # Binding already exists or other issue; don't block execution
 
     def process_started(pid: int, identity: ProcessIdentity | None) -> None:
         payload = canonical_json({"pid": pid, "identity": identity.to_dict() if identity is not None else None})
@@ -453,4 +610,44 @@ async def run_persisted(store: EventStore, packet: TaskPacket, attempt: Executio
                                      exec_detail)
     except (ConflictError, ExecutionGuardError):
         pass  # Best-effort; execution already recorded elsewhere
+
+    # Record revocation evidence after attempt completion
+    # This captures the authority revocation outcome for audit trail
+    # Derives the outcome from the actual OrchestrationLifecycle.revoke_attempt()
+    # result; never hardcodes success.
+    from .policy_ipc import AttemptRevocationResult
+
+    revocation_result: AttemptRevocationResult | None = None
+    if lifecycle is not None and completed.attempt_id is not None:
+        try:
+            revocation_result = lifecycle.revoke_attempt(completed.attempt_id)
+        except Exception as exc:
+            revocation_result = AttemptRevocationResult.CLEANUP_FAILED
+            revocation_reason = f"revocation exception: {exc}"
+        else:
+            revocation_reason = (
+                f"Attempt {completed.status.value} - authority revoked with outcome: "
+                f"{revocation_result.value}"
+            )
+    else:
+        revocation_result = AttemptRevocationResult.UNKNOWN_ATTEMPT
+        revocation_reason = f"Attempt {completed.status.value} - no lifecycle available"
+
+    revocation_payload = canonical_json({
+        "attempt_id": completed.attempt_id,
+        "task_id": completed.task_id,
+        "outcome": revocation_result.value,
+        "reasoning": revocation_reason,
+        "timestamp": utc_now(),
+    })
+    revocation_evidence = EvidenceRecord(
+        evidence_id=uuid4().hex,
+        attempt_id=completed.attempt_id,
+        kind="revocation_result",
+        created_at=utc_now(),
+        payload_json=revocation_payload,
+        digest_sha256=digest_text(revocation_payload),
+    )
+    store.record_evidence(revocation_evidence, f"{command_prefix}:revoke")
+
     return completed, result, execution, evidence

@@ -229,5 +229,4 @@ def doctor(config: DiamondConfig) -> tuple[ProbeResult, ...]:
             provider, "disabled", None, detail="disabled by configuration; no process invoked"
         )
         for provider in Provider
-        if provider is not Provider.FREELLMAPI
     )

@@ -282,7 +282,7 @@ class StoreTests(ProjectCase):
         self.assertEqual(self.store.attempts(TASK_ID), (completed,))
         self.assertIn(evidence, self.store.evidence(TASK_ID))
         self.assertEqual({record.kind for record in self.store.evidence(TASK_ID)},
-                         {"launch_intent", "process_started", "provider_result"})
+                         {"launch_intent", "process_started", "provider_result", "revocation_result"})
         self.assertIn("controller-marker", evidence.payload_json)
         with self.assertRaises(ConflictError):
             asyncio.run(run_persisted(self.store, packet, attempt, invocation, self.project, "test-owner", "recorded",

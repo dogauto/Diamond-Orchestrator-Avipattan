@@ -254,7 +254,7 @@ class DiagnosticTests(ProjectCase):
         config = parse_config(source)
         with patch("diamond.diagnostics.probe_version", side_effect=lambda provider, executable: SimpleNamespace(provider=provider, status="available")) as probe:
             results = doctor(config)
-        self.assertEqual(len(results), 6)
+        self.assertEqual(len(results), 7)
         self.assertEqual(results[0].status, "disabled")
         self.assertEqual(probe.call_count, 5)
         self.assertNotIn(Provider.GEMINI, [call.args[0] for call in probe.call_args_list])
@@ -273,7 +273,7 @@ class DiagnosticTests(ProjectCase):
         config = parse_config(CONFIG_TEXT)
         providers = {provider: ProviderConfig(str(oversized if provider is Provider.GEMINI else valid), True) for provider in Provider}
         results = doctor(replace(config, providers=providers))
-        self.assertEqual([result.status for result in results], ["invalid_output"] + ["available"] * 5)
+        self.assertEqual([result.status for result in results], ["invalid_output"] + ["available"] * 6)
         self.assertTrue(all(result.auth_status == "NOT_CHECKED" for result in results))
         json.dumps([result.to_dict() for result in results], allow_nan=False)
 

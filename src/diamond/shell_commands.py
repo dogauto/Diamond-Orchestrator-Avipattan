@@ -207,7 +207,7 @@ def cmd_dashboard(shell: Any, args: list[str]) -> tuple[dict, bool]:
         proc = subprocess.Popen(
             [sys.executable, "-B", "-m", "diamond", "dashboard", "--port", port],
             env={"PYTHONPATH": str(Path(__file__).resolve().parents[2] / "src"),
-                 **__import__('os').environ},
+                 **os.environ},
         )
         print(f"{dim('Dashboard PID: ' + str(proc.pid))}")
         print(f"{dim('Press Ctrl+C to stop.')}")
