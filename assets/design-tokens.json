@@ -1,0 +1,207 @@
+{
+  "brand": "k\u00f3smos of Paradox",
+  "primitive": {
+    "color": {
+      "void": {
+        "50": {
+          "$value": "#1A1F35",
+          "$type": "color"
+        },
+        "100": {
+          "$value": "#141A33",
+          "$type": "color"
+        },
+        "200": {
+          "$value": "#0F1426",
+          "$type": "color"
+        },
+        "300": {
+          "$value": "#0B0E1A",
+          "$type": "color"
+        },
+        "400": {
+          "$value": "#080B15",
+          "$type": "color"
+        },
+        "500": {
+          "$value": "#05060C",
+          "$type": "color"
+        },
+        "600": {
+          "$value": "#030408",
+          "$type": "color"
+        },
+        "700": {
+          "$value": "#020306",
+          "$type": "color"
+        },
+        "800": {
+          "$value": "#010204",
+          "$type": "color"
+        },
+        "900": {
+          "$value": "#000000",
+          "$type": "color"
+        }
+      },
+      "spectral-cyan": {
+        "50": {
+          "$value": "#F0FCFF",
+          "$type": "color"
+        },
+        "100": {
+          "$value": "#DEF9FF",
+          "$type": "color"
+        },
+        "200": {
+          "$value": "#BDF2FF",
+          "$type": "color"
+        },
+        "300": {
+          "$value": "#9AEAFF",
+          "$type": "color"
+        },
+        "400": {
+          "$value": "#7BE7FF",
+          "$type": "color"
+        },
+        "500": {
+          "$value": "#5DE0FF",
+          "$type": "color"
+        },
+        "600": {
+          "$value": "#3DD5F8",
+          "$type": "color"
+        },
+        "700": {
+          "$value": "#2ABFDN",
+          "$type": "color"
+        },
+        "800": {
+          "$value": "#1BA0C1",
+          "$type": "color"
+        },
+        "900": {
+          "$value": "#0F7DA0",
+          "$type": "color"
+        }
+      },
+      "iridescent-pink": {
+        "50": {
+          "$value": "#FFF5FB",
+          "$type": "color"
+        },
+        "100": {
+          "$value": "#FFE9F7",
+          "$type": "color"
+        },
+        "200": {
+          "$value": "#FFD0EF",
+          "$type": "color"
+        },
+        "300": {
+          "$value": "#FFADDF",
+          "$type": "color"
+        },
+        "400": {
+          "$value": "#FF6FC8",
+          "$type": "color"
+        },
+        "500": {
+          "$value": "#FF5ABF",
+          "$type": "color"
+        },
+        "600": {
+          "$value": "#FF3DB5",
+          "$type": "color"
+        },
+        "700": {
+          "$value": "#F92898",
+          "$type": "color"
+        },
+        "800": {
+          "$value": "#DC1F7C",
+          "$type": "color"
+        },
+        "900": {
+          "$value": "#AA165C",
+          "$type": "color"
+        }
+      },
+      "prism-white": {
+        "50": {
+          "$value": "#FFFFFF",
+          "$type": "color"
+        },
+        "100": {
+          "$value": "#FAF8F6",
+          "$type": "color"
+        },
+        "200": {
+          "$value": "#F4EDE4",
+          "$type": "color"
+        },
+        "300": {
+          "$value": "#E8DFD1",
+          "$type": "color"
+        },
+        "400": {
+          "$value": "#D9CCBC",
+          "$type": "color"
+        },
+        "500": {
+          "$value": "#C4B49A",
+          "$type": "color"
+        },
+        "600": {
+          "$value": "#A89676",
+          "$type": "color"
+        },
+        "700": {
+          "$value": "#8A7758",
+          "$type": "color"
+        },
+        "800": {
+          "$value": "#6D5C42",
+          "$type": "color"
+        },
+        "900": {
+          "$value": "#4A4030",
+          "$type": "color"
+        }
+      }
+    }
+  },
+  "semantic": {
+    "color": {
+      "primary": {
+        "$value": "{primitive.color.void.300}",
+        "$type": "color"
+      },
+      "secondary": {
+        "$value": "{primitive.color.spectral-cyan.400}",
+        "$type": "color"
+      },
+      "accent": {
+        "$value": "{primitive.color.iridescent-pink.400}",
+        "$type": "color"
+      },
+      "success": {
+        "$value": "{primitive.color.spectral-cyan.400}",
+        "$type": "color"
+      },
+      "warning": {
+        "$value": "#FFC98B",
+        "$type": "color"
+      },
+      "error": {
+        "$value": "#E8453C",
+        "$type": "color"
+      },
+      "info": {
+        "$value": "{primitive.color.spectral-cyan.400}",
+        "$type": "color"
+      }
+    }
+  }
+}

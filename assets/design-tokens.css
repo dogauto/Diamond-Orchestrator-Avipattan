@@ -1,0 +1,67 @@
+/* Design Tokens — kósmos of Paradox */
+/* Generated from docs/brand-guidelines.md — do not edit directly */
+
+:root {
+  /* ── Void ── */
+  --token-void-50:  #1A1F35;
+  --token-void-100: #141A33;
+  --token-void-200: #0F1426;
+  --token-void-300: #0B0E1A;
+  --token-void-400: #080B15;
+  --token-void-500: #05060C;
+  --token-void-600: #030408;
+  --token-void-700: #020306;
+  --token-void-800: #010204;
+  --token-void-900: #000000;
+
+  /* ── Spectral Cyan ── */
+  --token-cyan-50:   #F0FCFF;
+  --token-cyan-100:  #DEF9FF;
+  --token-cyan-200:  #BDF2FF;
+  --token-cyan-300:  #9AEAFF;
+  --token-cyan-400:  #7BE7FF;
+  --token-cyan-500:  #5DE0FF;
+  --token-cyan-600:  #3DD5F8;
+  --token-cyan-700:  #2ABFDN;
+  --token-cyan-800:  #1BA0C1;
+  --token-cyan-900:  #0F7DA0;
+
+  /* ── Iridescent Pink ── */
+  --token-pink-50:   #FFF5FB;
+  --token-pink-100:  #FFE9F7;
+  --token-pink-200:  #FFD0EF;
+  --token-pink-300:  #FFADDF;
+  --token-pink-400:  #FF6FC8;
+  --token-pink-500:  #FF5ABF;
+  --token-pink-600:  #FF3DB5;
+  --token-pink-700:  #F92898;
+  --token-pink-800:  #DC1F7C;
+  --token-pink-900:  #AA165C;
+
+  /* ── Prism White ── */
+  --token-white-50:  #FFFFFF;
+  --token-white-100: #FAF8F6;
+  --token-white-200: #F4EDE4;
+  --token-white-300: #E8DFD1;
+  --token-white-400: #D9CCBC;
+  --token-white-500: #C4B49A;
+  --token-white-600: #A89676;
+  --token-white-700: #8A7758;
+  --token-white-800: #6D5C42;
+  --token-white-900: #4A4030;
+
+  /* ── Semantic ── */
+  --token-primary:      var(--token-void-300);
+  --token-secondary:    var(--token-cyan-400);
+  --token-accent:       var(--token-pink-400);
+  --token-success:      var(--token-cyan-400);
+  --token-warning:      #FFC98B;
+  --token-error:        #E8453C;
+  --token-info:         var(--token-cyan-400);
+
+  /* ── Surface ── */
+  --token-surface:     var(--token-void-100);
+  --token-text-primary: var(--token-white-200);
+  --token-text-muted:  var(--token-cyan-400);
+  --token-border:      var(--token-void-200);
+}
