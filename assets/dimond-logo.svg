@@ -1,7 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 1080" width="320" height="320">
-  <style>
-    @keyframes breathe { 0%,100%{opacity:.55} 50%{opacity:1} }
-    .breathe { animation: breathe 5s ease-in-out infinite; }
-  </style>
-  <image class="breathe" href="./assets/dimond-logo.jpg" x="0" y="0" width="1080" height="1080" preserveAspectRatio="xMidYMid slice"/>
+  <defs>
+    <clipPath id="diamond-clip"><circle cx="540" cy="540" r="520"/></clipPath>
+  </defs>
+  <image clip-path="url(#diamond-clip)" style="animation:breathe 5s ease-in-out infinite;"
+    href="data:image/jpeg;base64,{b64}"
+    x="0" y="0" width="1080" height="1080" preserveAspectRatio="xMidYMid slice"/>
 </svg>
