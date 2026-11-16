@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="./assets/dimond-logo.jpg" alt="Dimond Logo" width="320" />
+
 # Diamond Orchestrator
 
 ### Local control for evidence-backed AI workflows
